@@ -84,9 +84,9 @@ next_topic_label: ""
 next_topic_path: ""
 ---
 5. The dynamic fields to generate are:
-   - PageTitle: A strong, SEO-friendly, and descriptive title that includes keywords relevant to the homily as well as terms like "The Latin Mass", "Tridentine Mass", and "Traditional Catholic".
+   - PageTitle: A strong, SEO-friendly, and descriptive title that includes keywords relevant to the homily as well as words that connext with Traditional Catholicsm. The Title must be limited to less than 100 characters".
    - MetaDescription: A good description for SEO. No more than 160 characters. Do not mention the priest's name.
-   - YoutubeTags: A comma-separated list of many keywords relevant to the text, always including keywords about the Latin Mass, Tridentine Mass, and Traditional Catholic.
+   - YoutubeTags: A list of comma-separated keywords relevant to the text, always including keywords about the Latin Mass, Tridentine Mass, and Traditional Catholic.
    - YoutubeDescription: A detailed YouTube description in 3–4 paragraphs that must begin with the exact call-to-action text below:
      
      Please click on the link to Contribute to our project.

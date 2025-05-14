@@ -1,42 +1,53 @@
+# audio_clip.py
+
 from pydub import AudioSegment
 
 def clip_audio_segment(
     input_file: str,
-    start_sec: float = 0,
+    start_sec: float = 0.0,
     end_sec: float = None,
-    drop_last_sec: float = None,
-    output_file: str = "output.mp3"
+    output_file: str = "output.mp3",
+    add_silence_sec: float = 0.0
 ):
     """
-    Clips the input audio file:
-      – starting at `start_sec` seconds in,
-      – ending at `end_sec` seconds (if provided),
-      – or dropping the last `drop_last_sec` seconds (if provided).
+    Clips an audio file:
+      – starts at `start_sec` seconds into input_file,
+      – ends at `end_sec` seconds (if positive), or drops the last abs(end_sec) seconds if `end_sec` is negative,
+      – appends `add_silence_sec` seconds of silence at the end,
+      – and exports to `output_file` (mp3).
+
+    :param input_file:         path to source audio (any format pydub supports)
+    :param start_sec:          seconds from the start to begin clipping
+    :param end_sec:            if > 0, clip up to this many seconds from start;
+                               if < 0, clip up to (duration – abs(end_sec)) seconds;
+                               if None, clip to the very end
+    :param output_file:        path where the clipped mp3 will be saved
+    :param add_silence_sec:    seconds of silence to append after the clip
     """
     audio = AudioSegment.from_file(input_file)
-    start_ms = int(start_sec * 1000)
+    total_ms = len(audio)
 
-    if drop_last_sec is not None:
-        end_ms = len(audio) - int(drop_last_sec * 1000)
-    elif end_sec is not None:
+    # Compute start and end in milliseconds
+    start_ms = int(start_sec * 1000)
+    if end_sec is None:
+        end_ms = total_ms
+    elif end_sec >= 0:
         end_ms = int(end_sec * 1000)
     else:
-        end_ms = len(audio)
+        # drop the last abs(end_sec) seconds
+        end_ms = total_ms + int(end_sec * 1000)  # end_sec is negative
 
-    # Safety checks
-    start_ms = max(0, start_ms)
-    end_ms   = min(len(audio), end_ms)
+    # safety bounds
+    start_ms = max(0, min(start_ms, total_ms))
+    end_ms   = max(start_ms, min(end_ms, total_ms))
 
-    clipped = audio[start_ms:end_ms]
-    clipped.export(output_file, format="mp3")
-    print(f"Saved clipped audio to {output_file} "
-          f"(from {start_sec}s to {end_ms/1000:.2f}s)")
-    
-if __name__ == "__main__":
-    # Example: drop first 6.5 s and last 6.4 s
-    clip_audio_segment(
-        input_file="full_homily.mp3",
-        start_sec=6.5,
-        drop_last_sec=6.4,
-        output_file="clean_homily.mp3"
-    )
+    segment = audio[start_ms:end_ms]
+
+    # append silence if requested
+    if add_silence_sec > 0:
+        silence = AudioSegment.silent(duration=int(add_silence_sec * 1000))
+        segment = segment + silence
+
+    # export as MP3
+    segment.export(output_file, format="mp3")
+    return output_file

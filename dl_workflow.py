@@ -5,6 +5,7 @@ from auphonic_audio_cleaner import start_production, download_file
 from video_generator import create_text_video
 from video_script import generate_video_script
 import os
+import sys
 import json
 import subprocess
 from PIL import Image
@@ -13,6 +14,7 @@ from dotenv import load_dotenv
 from get_token import get_and_refresh_google_user_tokens, SCOPES
 from youtube import youtube_list_videos, youtube_upload_video, youtube_update_video, youtube_upload_captions
 from googleapiclient.errors import HttpError
+from txt_to_json import txt_to_json
 
 # Load environment variables (if using a .env file)
 load_dotenv()
@@ -36,30 +38,48 @@ def main():
     os.makedirs(final_output_dir, exist_ok=True)
 
     # -------------------------------
-    # 1. Transcribe Audio
+    # 1. Transcribe Audio or Parse TXT
     # -------------------------------
-    transcription_json_path = os.path.join(working_dir, "transcription.txt.json")
+    transcription_txt_path  = os.path.join(working_dir, "transcription.txt")
+    transcription_json_path = transcription_txt_path + ".json"
+
     if os.path.exists(transcription_json_path):
-        print("Transcript already exists. Loading...")
+        print("✅ JSON already exists. Loading…")
         with open(transcription_json_path, "r", encoding="utf-8") as f:
             transcript = json.load(f)
+
+    elif os.path.exists(transcription_txt_path):
+        print("⚡ TXT exists but JSON missing—parsing TXT to JSON…")
+        transcript = txt_to_json(transcription_txt_path, transcription_json_path)
+
     else:
-        print("Transcribing audio...")
+        print("🛠 No transcript found.  Running Whisper…")
         transcript = audio_to_text(audio_file, working_dir)
+
+
 
     # -------------------------------
     # 2. Extract Homily and Clip Audio
     # -------------------------------
     homily_file = os.path.join(working_dir, "homily.mp3")
+
+    # 2a. Try to extract the timestamps & segments once
+    try:
+        start, end, text, segments = find_homily(transcript, output_dir=working_dir)
+    except UnboundLocalError:
+        # find_homily prints "Phrase not found." then blows up on 'first'
+        print("🚫 Could not locate the homily section in your transcript.")
+        print("   • Check that your initial search phrase is correct,")
+        print("   • Or adjust the parameters in find_homily().")
+        sys.exit(1)
+
+    # 2b. Only run the (slow) clipping if we actually need to
     if os.path.exists(homily_file):
-        print("Homily audio file already exists; skipping clipping.")
-        with open(transcription_json_path, "r", encoding="utf-8") as f:
-            transcript = json.load(f)
-        start, end, text, segments = find_homily(transcript, output_dir=working_dir)
+        print("✅ Homily audio already exists; skipping clipping.")
     else:
-        print("Finding and clipping homily...")
-        start, end, text, segments = find_homily(transcript, output_dir=working_dir)
+        print(f"✂️  Clipping homily (from {start}s to {end}s) → {homily_file}")
         clip_audio_segment(audio_file, start, end, homily_file)
+
 
     # -------------------------------
     # 3. Generate Video Script JSON with trimmed segments
@@ -101,11 +121,13 @@ def main():
     else:
         print("Trimming cleaned audio (removing 6.45 s at start and end)…")
         clip_audio_segment(
-            input_file=homily_file_clean,
-            start_sec=6.45,
-            drop_last_sec=6.45,
-            output_file=homily_file_final
+            input_file=homily_file_clean,   # e.g. working/homily_clean.mp3
+            start_sec=6.4,                  # drop first ~6.4 s
+            end_sec=-6.4,                   # drop last ~6.4 s
+            output_file=homily_file_final,  # e.g. working/homily_final.mp3
+            add_silence_sec=1.0             # append 1 s of silence
         )
+
         print(f"Final homily audio saved as {homily_file_final}")
 
 
