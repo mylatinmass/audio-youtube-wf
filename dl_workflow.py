@@ -65,7 +65,7 @@ def main():
 
     # 2a. Try to extract the timestamps & segments once
     try:
-        start, end, text, segments = find_homily(transcript, output_dir=working_dir)
+        start, end, text, segments = find_homily(transcript)
     except UnboundLocalError:
         # find_homily prints "Phrase not found." then blows up on 'first'
         print("🚫 Could not locate the homily section in your transcript.")
