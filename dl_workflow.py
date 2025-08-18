@@ -66,12 +66,72 @@ def main():
     # 2a. Try to extract the timestamps & segments once
     try:
         start, end, text, segments = find_homily(transcript)
-    except UnboundLocalError:
-        # find_homily prints "Phrase not found." then blows up on 'first'
+    except (UnboundLocalError, RuntimeError):
         print("🚫 Could not locate the homily section in your transcript.")
-        print("   • Check that your initial search phrase is correct,")
-        print("   • Or adjust the parameters in find_homily().")
-        sys.exit(1)
+        print("   • You can now manually enter the start and end times.")
+
+        def parse_time_input(t):
+            """Convert 'mm:ss' or 'ss' to float seconds."""
+            if ":" in t:
+                mins, secs = t.split(":")
+                return float(mins) * 60 + float(secs)
+            return float(t)
+
+        while True:
+            try:
+                manual_start = float(parse_time_input(input("Enter START time (e.g., 123 or 2:03): ").strip()))
+                break
+            except ValueError:
+                print("❌ Invalid start time. Try again.")
+
+        while True:
+            manual_end_input = input("Enter END time (or press Enter for end of file): ").strip()
+            if manual_end_input == "":
+                manual_end = None
+                break
+            try:
+                manual_end = float(parse_time_input(manual_end_input))
+                break
+            except ValueError:
+                print("❌ Invalid end time. Try again.")
+
+        # Determine end time
+        from pydub.utils import mediainfo
+        if manual_end:
+            actual_end = manual_end
+        else:
+            try:
+                # Try transcript end time
+                if isinstance(transcript, list) and "end" in transcript[-1]:
+                    actual_end = float(transcript[-1]["end"])
+                elif isinstance(transcript, dict) and "segments" in transcript:
+                    actual_end = float(transcript["segments"][-1]["end"])
+                else:
+                    actual_end = float(mediainfo(audio_file)["duration"])
+            except:
+                actual_end = float(mediainfo(audio_file)["duration"])
+
+        # Build segments from transcript between manual times
+        if isinstance(transcript, dict) and "segments" in transcript:
+            all_segments = transcript["segments"]
+        elif isinstance(transcript, list):
+            all_segments = transcript
+        else:
+            all_segments = []
+
+        segments = [seg for seg in all_segments if float(seg.get("start", 0)) >= manual_start and float(seg.get("end", 0)) <= actual_end]
+
+        # Join text for MDX generation
+        text = " ".join(seg.get("text", "") for seg in segments)
+
+        # Save manual homily JSON so mdx_generator.py has correct data
+        homily_json_path = os.path.join(working_dir, "homily.json")
+        with open(homily_json_path, "w", encoding="utf-8") as f:
+            json.dump({"segments": segments, "text": text}, f, indent=2)
+
+        start, end = manual_start, actual_end
+
+
 
     # 2b. Only run the (slow) clipping if we actually need to
     if os.path.exists(homily_file):

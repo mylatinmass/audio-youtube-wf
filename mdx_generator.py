@@ -145,7 +145,14 @@ def generate_mdx_from_json(transcription_json_path):
         transcript = json.load(f)
 
     # Extract homily text using the find_homily function
-    start, end, text, segments = find_homily(transcript)
+    if "text" in transcript and "segments" in transcript:
+        # This is a pre-prepared manual JSON
+        text = transcript["text"]
+        segments = transcript["segments"]
+    else:
+    # Fall back to automatic find
+        start, end, text, segments = find_homily(transcript, audio_file="path/to/audio.mp3", working_dir=os.path.dirname(transcription_json_path))
+
 
     # Generate MDX content
     mdx_content = mdx_generator(text)

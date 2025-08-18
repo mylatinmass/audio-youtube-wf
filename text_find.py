@@ -1,4 +1,7 @@
 import re
+import os
+import json
+from pydub.utils import mediainfo
 
 # ─── single source of truth for your liturgical boundary ───
 # matches “holy ghost amen” or “holy spirit amen”
@@ -141,58 +144,118 @@ def find_next_word_start(transcript, timestamp):
                 return w['start']
     return None
 
-def find_homily(transcript, marker=HOMILY_MARKER, silence_threshold=SILENCE_THRESHOLD):
+def find_homily(transcript, marker=HOMILY_MARKER, silence_threshold=SILENCE_THRESHOLD, audio_file=None, working_dir=None):
     """
     Locate the homily by:
       1. Finding the opening marker ("holy ghost amen" or "holy spirit amen").
       2. Starting right after that marker.
       3. Scanning forward until there's a gap of at least `silence_threshold` seconds,
          which marks the end of the homily.
+      4. If marker not found, fall back to manual start/end entry.
     Returns: first, last, homily_text, video_segments
     """
-    # 1. Find opening marker
-    fm_start, fm_end = find_phrase_timestamps(transcript, marker, backwards=False)
-    if fm_end is None:
-        raise RuntimeError(f"Opening marker '{marker}' not found")
+    try:
+        # 1. Try finding opening marker
+        fm_start, fm_end = find_phrase_timestamps(transcript, marker, backwards=False)
+        if fm_end is None:
+            raise RuntimeError(f"Opening marker '{marker}' not found")
 
-    # 2. Homily starts after that 'Amen'
-    first = find_next_word_start(transcript, fm_end) or fm_end
+        # 2. Homily starts after that 'Amen'
+        first = find_next_word_start(transcript, fm_end) or fm_end
 
-    # 3. Gather all words from 'first' onward
-    words_after = []
-    for seg in transcript.get('segments', []):
-        for w in seg.get('words', []):
-            if w['start'] >= first:
-                words_after.append(w)
+        # 3. Gather all words from 'first' onward
+        words_after = []
+        for seg in transcript.get('segments', []):
+            for w in seg.get('words', []):
+                if w['start'] >= first:
+                    words_after.append(w)
 
-    if not words_after:
-        raise RuntimeError("No transcript words found after homily start")
+        if not words_after:
+            raise RuntimeError("No transcript words found after homily start")
 
-    # 4. Detect silence gap to mark end
-    last = None
-    for prev, curr in zip(words_after, words_after[1:]):
-        if curr['start'] - prev['end'] >= silence_threshold:
-            last = prev['end']
-            break
-    # fallback to end of last word if no silence gap
-    if last is None:
-        last = words_after[-1]['end']
+        # 4. Detect silence gap to mark end
+        last = None
+        for prev, curr in zip(words_after, words_after[1:]):
+            if curr['start'] - prev['end'] >= silence_threshold:
+                last = prev['end']
+                break
+        if last is None:
+            last = words_after[-1]['end']
 
-    # Build trimmed segments between first and last
-    trimmed = []
-    for seg in transcript.get('segments', []):
-        seg_words = [w for w in seg.get('words', []) if w['start'] >= first and w['end'] <= last]
-        if not seg_words:
-            continue
-        trimmed.append({
-            'start': seg_words[0]['start'] - first,
-            'end':   seg_words[-1]['end']   - first,
-            'text':  " ".join(w['word'] for w in seg_words),
-            'words': seg_words
-        })
+        # Build trimmed segments
+        trimmed = []
+        for seg in transcript.get('segments', []):
+            seg_words = [w for w in seg.get('words', []) if w['start'] >= first and w['end'] <= last]
+            if not seg_words:
+                continue
+            trimmed.append({
+                'start': seg_words[0]['start'] - first,
+                'end':   seg_words[-1]['end']   - first,
+                'text':  " ".join(w['word'] for w in seg_words),
+                'words': seg_words
+            })
 
-    homily_words   = [w['word'] for seg in trimmed for w in seg['words']]
-    homily_text    = " ".join(homily_words)
-    video_segments = [(s['start'], s['end'], s['text']) for s in trimmed]
+        homily_words   = [w['word'] for seg in trimmed for w in seg['words']]
+        homily_text    = " ".join(homily_words)
+        video_segments = [(s['start'], s['end'], s['text']) for s in trimmed]
 
-    return first, last, homily_text, video_segments
+        return first, last, homily_text, video_segments
+
+    except (UnboundLocalError, RuntimeError):
+        print("🚫 Could not locate the homily section in your transcript.")
+        print("   • You can now manually enter the start and end times.")
+
+        def parse_time_input(t):
+            if ":" in t:
+                mins, secs = t.split(":")
+                return float(mins) * 60 + float(secs)
+            return float(t)
+
+        while True:
+            try:
+                manual_start = float(parse_time_input(input("Enter START time (e.g., 123 or 2:03): ").strip()))
+                break
+            except ValueError:
+                print("❌ Invalid start time. Try again.")
+
+        while True:
+            manual_end_input = input("Enter END time (or press Enter for end of file): ").strip()
+            if manual_end_input == "":
+                manual_end = None
+                break
+            try:
+                manual_end = float(parse_time_input(manual_end_input))
+                break
+            except ValueError:
+                print("❌ Invalid end time. Try again.")
+
+        # Determine end time
+        if manual_end:
+            actual_end = manual_end
+        else:
+            try:
+                if isinstance(transcript, dict) and "segments" in transcript:
+                    actual_end = float(transcript["segments"][-1]["end"])
+                else:
+                    actual_end = float(mediainfo(audio_file)["duration"])
+            except:
+                actual_end = float(mediainfo(audio_file)["duration"])
+
+        # Build segments between manual times
+        if isinstance(transcript, dict) and "segments" in transcript:
+            all_segments = transcript["segments"]
+        elif isinstance(transcript, list):
+            all_segments = transcript
+        else:
+            all_segments = []
+
+        segments = [seg for seg in all_segments if float(seg.get("start", 0)) >= manual_start and float(seg.get("end", 0)) <= actual_end]
+        text = " ".join(seg.get("text", "") for seg in segments)
+
+        # Save manual JSON if working_dir provided
+        if working_dir:
+            homily_json_path = os.path.join(working_dir, "homily.json")
+            with open(homily_json_path, "w", encoding="utf-8") as f:
+                json.dump({"segments": segments, "text": text}, f, indent=2)
+
+        return manual_start, actual_end, text, [(seg["start"], seg["end"], seg.get("text", "")) for seg in segments]
