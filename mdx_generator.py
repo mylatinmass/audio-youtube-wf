@@ -6,7 +6,7 @@ import json
 import os
 
 # Set your OpenAI API key
-api_key = "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"
+api_key = "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"
 openai.api_key = api_key
 
 def mdx_generator(homily_text):
@@ -20,9 +20,9 @@ def mdx_generator(homily_text):
       - Divide the transcription into logical sections with meaningful headings/subheadings.
       - End with a 2–3 paragraph summary recapping the content.
       - Not mention the priest's name unless it is part of the text.
-      - Include a blockquote with the offertory at the top.
-      - Optionally include short Douay-Rheims Epistle and Gospel quotes (if relevant), based on the Sunday prior to today's date.
-      - Focus on SEO, ensuring the Title is strong and the keywords include not only topics of the homily but also terms like "The Latin Mass", "Tridentine Mass", and "Traditional Catholic".
+      - Include a blockquote with the offertory for the corresponding mass at the top.
+      - Optionally include short Douay-Rheims Epistle and Gospel quotes (if relevant), based on the Sunday prior to today's date in the traditional catholic of the 1962 Missal.
+      - Focus on SEO, ensuring the Title is strong and the keywords include not only topics of the homily but also terms like "Latin Mass", "Tridentine Mass", and "Traditional Catholic".
       - Include YouTube-specific fields: 
           - youtube_description: A detailed, engaging YouTube description in 3–4 paragraphs that begins with the following call-to-action text exactly as shown:
             

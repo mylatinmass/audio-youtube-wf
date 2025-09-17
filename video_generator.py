@@ -214,8 +214,13 @@ def create_text_video(json_path, bg_img_path, audio_path, final_video_path=None,
         final_video = concatenate_videoclips([intro_clip, main_composite])
         
         print("Outputting Full Video (video-with-text)...")
-        # Save the video-with-text (without concatenating an intro video) into the working folder.
-        output_path = final_video_path if final_video_path else os.path.join(os.path.dirname(json_path), "video-with-text.mp4")
+        # Name the final video after the background image when no custom path is provided.
+        if final_video_path:
+            output_path = final_video_path
+        else:
+            image_base = os.path.splitext(os.path.basename(bg_img_path))[0]
+            output_dir = os.path.dirname(json_path)
+            output_path = os.path.join(output_dir, f"{image_base}.mp4")
         print("Loading and integrating audio clip...")
         silence = AudioClip(lambda t: 0, duration=1, fps=44100).with_duration(1)
         audio_clip = AudioFileClip(audio_file_path)
