@@ -6,6 +6,7 @@ import json
 import os
 
 # Set your OpenAI API key
+api_key = "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"
 openai.api_key = api_key
 
 def mdx_generator(homily_text):
