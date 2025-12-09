@@ -10,7 +10,7 @@ os.environ['IMAGEMAGICK_BINARY'] = '/usr/local/bin/magick'
 
 # Update your file paths as needed
 json_path = "/Users/mainmarketing/Desktop/March 30th homily/working/transcription.txt.json"
-background_image_path = "/Users/mainmarketing/Downloads/DALL·E Sower Illustration Feb 24.webp"  # kept for output name logic
+background_image_path = "/Users/mainmarketing/Downloads/DALL·E Sower Illustration Feb 24.webp"
 # Final audio clip: this should be the homily_clean.mp3 in your working folder.
 audio_file_path = "/Users/mainmarketing/Desktop/March 30th homily/working/homily_clean.mp3"
 video_size = (video_width, video_height) = (2560, 1440)
@@ -59,10 +59,10 @@ def generate_subtitle_overlay_clips(segments, video_size):
                 duration = segments[i+1][0] - start
             else:
                 duration = max(end - start - reserved, 0)
-
-        # === CHANGED: build black background once per segment instead of opening an image ===
-        bg_img = Image.new("RGBA", video_size, (0, 0, 0, 255))  # solid black
-        overlay = Image.new("RGBA", video_size, (0, 0, 0, 150))  # keep your dim overlay look
+        
+        bg_img = Image.open(background_image_path).convert("RGBA")
+        bg_img = bg_img.resize(video_size, Image.Resampling.LANCZOS)
+        overlay = Image.new("RGBA", video_size, (0, 0, 0, 150))
         img = Image.alpha_composite(bg_img, overlay)
         
         wrapped_text = wrap_text(sentence, font, text_box_width)
@@ -134,8 +134,8 @@ def generate_banner_background_clip(video_size, duration):
     return background_clip
 
 def generate_subtitle_background_image_intro(video_size, duration, fps=24):
-    # === CHANGED: intro uses black base instead of loading image ===
-    bg_img = Image.new("RGBA", video_size, (0, 0, 0, 255))
+    bg_img = Image.open(background_image_path).convert("RGBA")
+    bg_img = bg_img.resize(video_size, Image.Resampling.LANCZOS)
     num_frames = int(duration * fps)
     frames = []
     for i in range(num_frames):
@@ -150,8 +150,8 @@ def generate_subtitle_background_image_intro(video_size, duration, fps=24):
     return frames
 
 def generate_subtitle_background_image_outro(video_size, duration=1, fps=24):
-    # === CHANGED: outro uses black base instead of loading image ===
-    bg_img = Image.new("RGBA", video_size, (0, 0, 0, 255))
+    bg_img = Image.open(background_image_path).convert("RGBA")
+    bg_img = bg_img.resize(video_size, Image.Resampling.LANCZOS)
     num_frames = int(duration * fps)
     frames = []
     for i in range(num_frames):
@@ -214,7 +214,7 @@ def create_text_video(json_path, bg_img_path, audio_path, final_video_path=None,
         final_video = concatenate_videoclips([intro_clip, main_composite])
         
         print("Outputting Full Video (video-with-text)...")
-        # Name the final video after the background image when no custom path is provided. (UNCHANGED)
+        # Name the final video after the background image when no custom path is provided.
         if final_video_path:
             output_path = final_video_path
         else:

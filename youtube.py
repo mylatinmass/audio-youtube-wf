@@ -55,16 +55,49 @@ def youtube_list_videos(tokens, max_results=25):
         return []
 
 
+def _append_edu_block_to_description(description, edu_type=None, edu_problems=None):
+    """
+    Minimal helper: append Education 'type' and 'problems' to the description so they are preserved on upload.
+    """
+    if not edu_type and not edu_problems:
+        return description
+
+    lines = []
+    lines.append(description or "")
+
+    lines.append("\n\n---")
+    lines.append("EDUCATION METADATA")
+    if edu_type:
+        lines.append(f"Type: {edu_type}")
+    if edu_problems:
+        lines.append("Problems:")
+        # Ensure each problem is on its own line e.g. "0:45 Question..."
+        for p in edu_problems:
+            lines.append(f"- {p}")
+
+    return "\n".join(lines).strip()
+
+
 def youtube_upload_video(tokens, file_path, title, description, tags=None,
-                         categoryId="22", privacyStatus="public"):
+                         categoryId="27", privacyStatus="public",
+                         edu_type=None, edu_problems=None):
     """
     Uploads a video to YouTube.
+
+    Minimal changes:
+    - Default categoryId set to "27" (Education).
+    - Optional 'edu_type' and 'edu_problems' get appended to the description
+      so your script/UI settings are represented even if the API field isn't exposed.
     """
     youtube = build_youtube_service(tokens)
+
+    # Append edu block (if provided) to description
+    final_description = _append_edu_block_to_description(description, edu_type, edu_problems)
+
     body = {
         "snippet": {
             "title": title,
-            "description": description,
+            "description": final_description,
             "tags": tags,
             "categoryId": categoryId,
         },
@@ -78,10 +111,13 @@ def youtube_upload_video(tokens, file_path, title, description, tags=None,
         print("Uploading video...")
         print(f"File: {file_path}")
         print(f"Title: {title}")
-        print(f"Description: {description}")
-        print(f"Tags: {tags}")
         print(f"Category ID: {categoryId}")
         print(f"Privacy Status: {privacyStatus}")
+        if tags:
+            print(f"Tags: {tags}")
+        if edu_type or edu_problems:
+            print("Including Education metadata in description block.")
+
         print("Please wait...")
         request = youtube.videos().insert(
             part="snippet,status",
@@ -133,7 +169,7 @@ def youtube_update_video(tokens, video_id, new_description=None, new_title=None,
             ).execute()
             print("Video metadata updated.")
 
-        # If updating the thumbnail
+        # If updating the thumbnail (you said you'll add thumbnails later—leave unused for now)
         if new_thumbnail_path:
             thumbnail_response = youtube.thumbnails().set(
                 videoId=video_id,
@@ -190,32 +226,34 @@ if __name__ == "__main__":
             video_id = item["contentDetails"]["videoId"]
             print(f"Title: {title} (ID: {video_id})")
 
-        # 2. Upload Video
-        # Uncomment and update the following lines to test video upload.
+        # 2. Upload Video (example — leave commented until you wire values)
         # upload_response = youtube_upload_video(
         #     tokens,
         #     file_path="path/to/your/video.mp4",
         #     title="Test Video",
         #     description="This is a test video upload.",
-        #     tags=["test", "video"],
-        #     categoryId="22",  # People & Blogs category
-        #     privacyStatus="private"
+        #     tags=["latin mass", "traditional catholic", "tridentine mass"],
+        #     categoryId="27",  # Education (default already 27)
+        #     privacyStatus="private",
+        #     edu_type="Real life application",
+        #     edu_problems=[
+        #         "0:45 How does gravity affect the motion of falling objects?",
+        #         "2:10 What is the role of friction in everyday activities?",
+        #         "4:25 How do simple machines like levers make work easier?"
+        #     ]
         # )
         # print("Upload Response Video ID:", upload_response)
 
         # 3. Update Video (metadata and/or thumbnail)
-        # Uncomment and update the following lines to test updating a video.
         # video_id_to_update = "YOUR_VIDEO_ID"
         # update_result = youtube_update_video(
         #     tokens,
         #     video_id=video_id_to_update,
-        #     new_description="Updated video description",
-        #     new_title="Updated Video Title",
-        #     new_thumbnail_path="path/to/new/thumbnail.jpg"
+        #     new_description="Updated video description"
         # )
         # print("Update Response:", update_result)
 
-        # 4. Upload Captions (Uncomment to test)
+        # 4. Upload Captions
         # youtube_upload_captions(
         #     tokens,
         #     video_id="YOUR_VIDEO_ID",

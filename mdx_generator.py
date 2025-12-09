@@ -1,165 +1,579 @@
 # mdx_generator.py
 import datetime
-import openai
-from text_find import find_homily
 import json
 import os
+import re
+from typing import Optional, List, Dict, Any
 
-# Set your OpenAI API key
-api_key = "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"
-openai.api_key = api_key
+import openai
+from text_find import find_homily  # your existing helper
 
-def mdx_generator(homily_text):
+
+# ---------------------------
+# OpenAI setup
+# ---------------------------
+openai.api_key = os.getenv("OPENAI_KEY")
+if not openai.api_key:
+    raise RuntimeError("OPENAI_KEY is not set in the environment.")
+
+
+# ---------------------------
+# Helpers for date/propers
+# ---------------------------
+def get_previous_sunday(d: datetime.date) -> datetime.date:
+    """If today is Sunday -> same day; else go back to previous Sunday."""
+    return d - datetime.timedelta(days=(d.weekday() + 1) % 7)
+
+
+def infer_mass_hint(homily_text: str) -> Optional[str]:
     """
-    Generate an MDX page from the provided homily transcription text.
-    
-    This is the text of a very long speech, usually more than 10 minutes long. The transcription text must remain 100% unchanged.
-    Do not clip any of the text. The generated MDX page will:
-      - Include a dynamic front matter section with generated fields (PageTitle, MetaDescription, etc.), ensuring that all values are wrapped in quotes.
-      - Start with a "Summary of Headings" (table of contents with anchor links).
-      - Divide the transcription into logical sections with meaningful headings/subheadings.
-      - End with a 2–3 paragraph summary recapping the content.
-      - Not mention the priest's name unless it is part of the text.
-      - Include a blockquote with the offertory for the corresponding mass at the top.
-      - Optionally include short Douay-Rheims Epistle and Gospel quotes (if relevant), based on the Sunday prior to today's date in the traditional catholic of the 1962 Missal.
-      - Focus on SEO, ensuring the Title is strong and the keywords include not only topics of the homily but also terms like "Latin Mass", "Tridentine Mass", and "Traditional Catholic".
-      - Include YouTube-specific fields: 
-          - youtube_description: A detailed, engaging YouTube description in 3–4 paragraphs that begins with the following call-to-action text exactly as shown:
-            
-            Please click on the link to Contribute to our project.
-            https://www.mylatinmass.com/donate
-
-            Thank you. All contributions are greatly appreciated.
-            - - -
-            ABOUT THIS VIDEO:
-            
-            Followed by a rich description of the lecture.
-          - youtube_hash: A comma-separated list of hashtags relevant to the lecture.
-    
-    Parameters:
-      homily_text (str): The complete, unedited transcription text.
-    
-    Returns:
-      str: The MDX page content.
+    Very light heuristic to extract a Mass/feast name likely said aloud.
+    Returns a normalized key you can use in the table below.
     """
-    # Calculate dynamic dates for the front matter.
+    txt = (homily_text or "").lower()
+
+    # Nth Sunday after Pentecost
+    m = re.search(r"\b(\d{1,2})(st|nd|rd|th)\s+sunday\s+after\s+pentecost\b", txt)
+    if m:
+        n = int(m.group(1))
+        suffix = "th" if n in (11, 12, 13) else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suffix}-sunday-after-pentecost"
+
+    # Advent
+    m = re.search(r"\b(\d{1,2})(st|nd|rd|th)\s+sunday\s+of\s+advent\b", txt)
+    if m:
+        n = int(m.group(1))
+        suffix = "th" if n in (11, 12, 13) else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suffix}-sunday-of-advent"
+
+    # Lent
+    m = re.search(r"\b(\d{1,2})(st|nd|rd|th)\s+sunday\s+in\s+lent\b", txt)
+    if m:
+        n = int(m.group(1))
+        suffix = "th" if n in (11, 12, 13) else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suffix}-sunday-in-lent"
+
+    # Common feasts (expand over time)
+    FEASTS = [
+        ("immaculate conception", "immaculate-conception"),
+        ("christ the king", "christ-the-king"),
+        ("sacred heart", "sacred-heart"),
+        ("epiphany", "epiphany"),
+        ("ascension", "ascension"),
+        ("corpus christi", "corpus-christi"),
+        ("annunciation", "annunciation"),
+        ("assumption", "assumption"),
+        ("purification", "purification"),
+        ("presentation", "presentation"),
+        ("nativity of our lord", "christmas-day"),
+        ("christmas", "christmas-day"),
+        ("all saints", "all-saints"),
+    ]
+    for needle, key in FEASTS:
+        if needle in txt:
+            return key
+
+    return None
+
+
+def get_1962_reading(previous_sunday: datetime.date, mass_hint: Optional[str]):
+    """
+    Return ONE liturgical text (1962 Missal) for the identified Mass, or None.
+
+    Shape:
+    {
+      "label": "Introit" | "Collect" | ...,
+      "text": "“…” (reference)"
+    }
+    """
+    ymd = previous_sunday.strftime("%Y-%m-%d")
+
+    # ========== START: your curated library (expand over time) ==========
+    by_mass = {
+        # "20th-sunday-after-pentecost": {
+        #     "label": "Communion",
+        #     "text": "“Tu mandasti mandata tua custodiri nimis…” (Ps 118) — Communion (1962 Missal)"
+        # },
+        # "all-saints": {
+        #     "label": "Introit",
+        #     "text": "“Gaudeamus omnes in Domino…” — Introit, Missa Omnium Sanctorum (1962)"
+        # },
+        # "christ-the-king": {
+        #     "label": "Collect",
+        #     "text": "“Omnipotens sempiterne Deus, qui dilecto Filio tuo universorum Rege...” — Collect (1962)"
+        # },
+    }
+
+    by_date = {
+        # "2025-11-02": {"label": "Communion", "text": "…” (ref)"},
+    }
+    # ========== END: your curated library ==========
+
+    if mass_hint and mass_hint in by_mass:
+        return by_mass[mass_hint]
+    if ymd in by_date:
+        return by_date[ymd]
+    return None
+
+
+# ---------------------------
+# Segment normalizer
+# ---------------------------
+def _normalize_segments(segments: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    """
+    Ensure segments are a list of dicts with keys: start, end, text.
+
+    Accepts:
+      - dict segments: {"start": ..., "end": ..., "text": ...}
+      - tuple/list segments, e.g. (start, end, text) or (id, start, end, text)
+
+    This prevents 'AttributeError: tuple object has no attribute get'
+    when upstream code passes tuples instead of dicts.
+    """
+    normalized: List[Dict[str, Any]] = []
+
+    for s in segments or []:
+        # Case 1: already a dict from Whisper/JSON
+        if isinstance(s, dict):
+            normalized.append({
+                "start": float(s.get("start", 0.0)),
+                "end": float(s.get("end", 0.0)),
+                "text": str(s.get("text", "") or "").strip(),
+            })
+            continue
+
+        # Case 2: tuple or list
+        if isinstance(s, (list, tuple)):
+            start = 0.0
+            end = 0.0
+            text = ""
+
+            if len(s) >= 3:
+                # looks like (start, end, text)
+                if isinstance(s[0], (int, float)) and isinstance(s[1], (int, float)):
+                    start = s[0]
+                    end = s[1]
+                    text = s[2]
+                # looks like (id, start, end, text)
+                elif len(s) >= 4 and isinstance(s[1], (int, float)) and isinstance(s[2], (int, float)):
+                    start = s[1]
+                    end = s[2]
+                    text = s[3]
+                else:
+                    # fallback: assume first three = (start, end, text)
+                    start, end, text = s[0], s[1], s[2]
+
+            normalized.append({
+                "start": float(start),
+                "end": float(end),
+                "text": str(text or "").strip(),
+            })
+
+    return normalized
+
+
+# ---------------------------
+# Core generator
+# ---------------------------
+def mdx_generator(homily_text: str, segments: Optional[List[Dict[str, Any]]] = None) -> str:
+    """
+    Generates the MDX page structure using ONLY the homily text.
+    - The model returns JSON (front matter, TOC, headings, summary, shorts, chapters).
+    - We assemble final MDX locally, preserving the homily text unchanged
+      (just inserting headings before certain paragraphs).
+    """
+
     today = datetime.date.today()
-    # Calculate the previous Sunday (if today is Sunday, it will return today).
-    offset = (today.weekday() + 1) % 7
-    previous_sunday = today - datetime.timedelta(days=offset)
-    date_str = previous_sunday.strftime("%Y-%m-%d")  # previous Sunday
-    mod_date_str = today.strftime("%Y-%m-%d")         # today
+    previous_sunday = get_previous_sunday(today)
+    date_str = previous_sunday.strftime("%Y-%m-%d")
+    mod_date_str = today.strftime("%Y-%m-%d")
 
-    # Build the prompt for GPT-4.
+    # Determine Mass/feast hint from the homily text, then fetch ONE 1962 reading
+    mass_hint = infer_mass_hint(homily_text)
+    reading = get_1962_reading(previous_sunday, mass_hint)
+    liturgical_block = ""
+    if reading and reading.get("text") and reading.get("label"):
+        liturgical_block = (
+            f"> **{reading['label']} (1962 Missal)**\n"
+            f"> {reading['text']}\n"
+        )
+
+    # Normalize segments first so we can handle dicts OR tuples
+    normalized_segments = _normalize_segments(segments)
+
+    # Compact segments to avoid token bloat
+    _compact = []
+    for s in normalized_segments:
+        _compact.append({
+            "start": float(s["start"]),
+            "end": float(s["end"]),
+            "text": (s["text"] or "")[:120],  # slightly more context for better alignment
+        })
+    segments_json = json.dumps(_compact[:2000], ensure_ascii=False)  # hard cap
+
+    # Prompt for JSON only; we assemble MDX locally
     prompt = f"""
-You are an expert MDX formatter. Your task is to transform the provided transcription text (which must remain 100% unchanged)
-into a complete MDX page with logical headings and subheadings. In addition, generate a dynamic front matter section based on an analysis of the text.
-Do not alter or remove any words from the transcription. Keep in mind that this is a Catholic homily that may include religious phrases, Ecclesiastical Latin, and references relevant to Traditional Catholics who follow the Tridentine Mass.
+You are an MDX formatter for a Traditional Catholic homily. DO NOT return the homily body.
+Output ONLY a single JSON object with these keys:
 
-Requirements:
-1. At the very top, insert a "Summary of Headings" table of contents with anchor links to each section.
-2. Insert meaningful section headings and subheadings throughout the text to break it into logical, readable sections.
-3. Include a final summary in 2–3 paragraphs that concisely recaps the text.
-4. Generate dynamic front matter fields by analyzing the text. Each front matter value MUST be wrapped in quotes. For example, use:
----
-title: "{{PageTitle}}"
-description: "{{MetaDescription}}"
-keywords: "{{YoutubeTags}}"
-youtube_description: "{{YoutubeDescription}}"
-youtube_hash: "{{YoutubeHash}}"
-mdx_file: "src/mds/{{PageTitleInKebabCase}}.mdx"
-category: "lectures"
-slug: "/{{PageTitleInKebabCase}}"
-date: "{date_str}" 
-modDate: "{mod_date_str}"
-author: "Fr. Gerrity"
-media_type: "video"
-media_path: "{{YoutubeVideoId}}"
-media_title: "{{PageTitle}}"
-media_alt: "{{MediaAltText}}"
-media_aria: "{{MediaAriaLabel}}"
-prev_topic_label: ""
-prev_topic_path: ""
-next_topic_label: ""
-next_topic_path: ""
----
-5. The dynamic fields to generate are:
-   - PageTitle: A strong, SEO-friendly, and descriptive title that includes keywords relevant to the homily as well as words that connext with Traditional Catholicsm. The Title must be limited to less than 100 characters".
-   - MetaDescription: A good description for SEO. No more than 160 characters. Do not mention the priest's name.
-   - YoutubeTags: A list of comma-separated keywords relevant to the text, always including keywords about the Latin Mass, Tridentine Mass, and Traditional Catholic.
-   - YoutubeDescription: A detailed YouTube description in 3–4 paragraphs that must begin with the exact call-to-action text below:
-     
-     Please click on the link to Contribute to our project.
-     https://www.mylatinmass.com/donate
+{{
+  "front_matter": {{
+    "title": "<string>",
+    "description": "<string>",
+    "keywords": "<comma-separated>",
+    "youtube_category": "Education",
+    "youtube_description": "<EXACTLY three paragraphs beginning with the donation preface as provided below>",
+    "youtube_hash": "<comma-separated>",
+    "mdx_file": "src/mds/lectures/<kebab>.mdx",
+    "category": "lectures",
+    "slug": "/<kebab>",
+    "date": "{date_str}",
+    "modDate": "{mod_date_str}",
+    "author": "<string or empty if unknown>",
+    "media_type": "video",
+    "media_path": "<YouTube ID or empty>",
+    "media_title": "<= same as title>",
+    "media_alt": "<string>",
+    "media_aria": "<string>",
+    "prev_topic_label": "",
+    "prev_topic_path": "",
+    "next_topic_label": "",
+    "next_topic_path": ""
+  }},
+  "toc": [
+    "<H2 or H3 title>", "<H2/H3>", "..."
+  ],
+  "headings": [
+    {{ "para_index": 0, "level": "h2", "title": "<title>" }},
+    {{ "para_index": 3, "level": "h3", "title": "<title>" }}
+  ],
+  "summary_paragraphs": [
+    "<para 1>", "<para 2>", "<para 3 (optional)>"
+  ],
+  "shorts": [
+    {{
+      "title": "<<=80 chars>",
+      "quote": "<<=220 chars verbatim>",
+      "start": <float|null>,
+      "end": <float|null>,
+      "keywords": ["word","word"]
+    }}
+  ],
+  "chapters": [
+    {{
+      "title": "<section title used as chapter>",
+      "anchor": "<kebab-case-anchor>",
+      "start": <float|null>
+    }}
+  ]
+}}
 
-     Thank you. All contributions are greatly appreciated.
-     - - -
-     ABOUT THIS VIDEO:
-     
-     Then follow with a rich description of the lecture.
-   - YoutubeHash: A comma-separated list of hashtags related to the lecture.
-   - PageTitleInKebabCase: The PageTitle in kebab-case.
-   - YoutubeVideoId: If applicable; if not, leave blank.
-   - MediaAltText: A suitable alternative text for the media.
-   - MediaAriaLabel: A suitable ARIA label.
-6. If relevant to the content, insert short Douay-Rheims Epistle and Gospel quotes (and only those two) from the Sunday prior to today's date ({date_str}); otherwise, omit them.
-7. At the top of the document, output a main heading with the PageTitle, followed by a blockquote containing the offertory:
-> **Offertory**
-> "Out of the depths I have cried to thee, O Lord: Lord, hear my voice..."
+STRICT RULES:
+- Use ONLY the HOMILY_TEXT for:
+  - headings,
+  - TOC titles,
+  - summaries,
+  - quotes,
+  - shorts,
+  - chapters.
+  Do NOT invent lines.
+- Do NOT echo or return the homily body anywhere in the JSON.
+- Design subsections so each H2/H3 could stand alone as a short spiritual "mini-article."
+- Prefer clear, punchy titles that can be used as anchor links and YouTube chapter titles.
 
-Below is the transcription text that must remain unaltered except for the inserted headings and structure:
+YOUTUBE DESCRIPTION:
+- youtube_description MUST begin exactly with:
 
+  Please click on the link to Contribute to our project.
+  https://www.mylatinmass.com/donate
+
+  Thank you. All contributions are greatly appreciated.
+  - - -
+  ABOUT THIS VIDEO:
+
+  Then write EXACTLY three paragraphs:
+  (1) Main thesis + liturgical/scriptural context, referencing the Traditional Latin Mass / Tridentine Mass.
+  (2) 2–3 key insights from the homily.
+  (3) Pastoral application and encouragement for the listener.
+
+  After those three paragraphs, add a blank line and then EXACTLY this text:
+
+  Subscribe to this channel for videos about:
+  Latin Mass, Traditional Catholic Teaching, Tridentine Mass, SSPX, Our Lady of Victory, Our Lady of the Most Holy Rosary, Saint Philomena, and more...
+
+KEYWORDS:
+- Front matter keywords must include at least these three terms:
+  "Latin Mass", "Tridentine Mass", "Traditional Catholic"
+  plus other relevant tags from the homily.
+
+HEADINGS & TOC:
+- For "headings", compute paragraph indices by splitting HOMILY_TEXT on blank lines.
+  Insert each heading BEFORE the paragraph at the given index.
+- "toc" should include all H2 and H3 titles in reading order.
+
+SHORTS:
+- If SEGMENTS_JSON is provided, align the quoted text to segments and compute start/end seconds
+  (~30–45s windows at natural pauses). If you cannot find a good match, set both to null.
+
+CHAPTERS:
+- Chapters should correspond to the MAJOR H2 sections (and optionally big H3s).
+- Each chapter title should be suitable as a YouTube chapter title.
+- If SEGMENTS_JSON is provided, align each chapter to the approximate start second where
+  that section begins in the audio. If you cannot find it, set start to null.
+- "anchor" should be a kebab-case version of the title (for MDX slug anchors).
+
+CONTEXT FOR PAGE HEADER (INCLUDE ONLY IF PRESENT WHEN ASSEMBLING LOCALLY; DO NOT COPY):
+LITURGICAL_READING_BLOCK:
+{liturgical_block if liturgical_block else "(none)"}
+
+HOMILY_TEXT (unchanged, used only for analysis — do NOT echo back):
 {homily_text}
 
-Remember:
-- Do not change any words from the transcription.
-- Insert headings and structure solely to improve readability.
-- Generate all dynamic front matter fields by analyzing the text.
-- Produce the final MDX output as one complete document.
-    """
+SEGMENTS_JSON (optional for timing):
+{segments_json}
+"""
 
-    # Call the OpenAI API to generate the MDX page.
     response = openai.chat.completions.create(
         model="gpt-4o",
-        max_completion_tokens=16000,
-        temperature=0.7,
+        temperature=0.4,
+        max_completion_tokens=2048,
+        response_format={"type": "json_object"},
         messages=[
             {
                 "role": "system",
-                "content": "You are a careful MDX formatter. Ensure that the transcription text remains 100% unchanged and that all headings and dynamic front matter fields are generated based on a thorough analysis of the text. Do not clip, change, edit or remove ANY of the text that is provided. Generate the full MDX page including all of the text. No suggestions, give me the final MDX ready to be taken live."
+                "content": (
+                    "You are a careful MDX formatter for Catholic homilies. "
+                    "Return only a single valid JSON object per instructions. "
+                    "Never include the homily text itself in your response."
+                ),
             },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
+            {"role": "user", "content": prompt},
+        ],
     )
-    
-    # Extract the MDX page content from the response.
-    mdx_page = response.choices[0].message.content
+
+    payload_raw = (response.choices[0].message.content or "").strip()
+
+    if not payload_raw:
+        debug_path = os.path.join(os.path.dirname(__file__), "last_model_response.txt")
+        try:
+            with open(debug_path, "w", encoding="utf-8") as dbg:
+                dbg.write(str(response))
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Model returned empty content. Full response saved to last_model_response.txt for inspection."
+        )
+
+    # Strip fences if any
+    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", payload_raw, re.DOTALL)
+    if m:
+        payload_raw = m.group(1).strip()
+
+    try:
+        payload = json.loads(payload_raw)
+    except json.JSONDecodeError as e:
+        debug_path = os.path.join(os.path.dirname(__file__), "last_model_payload.json.txt")
+        try:
+            with open(debug_path, "w", encoding="utf-8") as dbg:
+                dbg.write(payload_raw)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Model did not return valid JSON ({e}). Raw payload saved to {debug_path}."
+        )
+
+    fm = payload.get("front_matter", {}) or {}
+    toc = payload.get("toc", []) or []
+    headings = payload.get("headings", []) or []
+    summary_paras = payload.get("summary_paragraphs", []) or []
+    shorts = payload.get("shorts", []) or []
+    chapters = payload.get("chapters", []) or []
+
+    # Build YAML front matter
+    def _yaml_escape(s: str) -> str:
+        return (s or "").replace('"', '\\"')
+
+    kebab = (fm.get("title") or "homily").strip().lower()
+    kebab = re.sub(r"[^a-z0-9]+", "-", kebab).strip("-")
+
+    fm_defaults = {
+        "title": fm.get("title") or "Untitled Homily",
+        "description": fm.get("description") or "",
+        "keywords": fm.get("keywords") or "Latin Mass, Tridentine Mass, Traditional Catholic",
+        "youtube_category": fm.get("youtube_category") or "Education",
+        "youtube_description": fm.get("youtube_description") or "",
+        "youtube_hash": fm.get("youtube_hash") or "",
+        "mdx_file": fm.get("mdx_file") or f"src/mds/lectures/{kebab}.mdx",
+        "category": fm.get("category") or "lectures",
+        "slug": fm.get("slug") or f"/{kebab}",
+        "date": fm.get("date") or date_str,
+        "modDate": fm.get("modDate") or mod_date_str,
+        "author": fm.get("author") or "",
+        "media_type": fm.get("media_type") or "video",
+        "media_path": fm.get("media_path") or "",
+        "media_title": fm.get("media_title") or (fm.get("title") or "Untitled Homily"),
+        "media_alt": fm.get("media_alt") or (fm.get("title") or "Homily video"),
+        "media_aria": fm.get("media_aria") or (fm.get("title") or "Homily video"),
+        "prev_topic_label": fm.get("prev_topic_label") or "",
+        "prev_topic_path": fm.get("prev_topic_path") or "",
+        "next_topic_label": fm.get("next_topic_label") or "",
+        "next_topic_path": fm.get("next_topic_path") or "",
+    }
+
+    yaml_lines: List[str] = ["---"]
+    for k in [
+        "title",
+        "description",
+        "keywords",
+        "youtube_category",
+        "youtube_description",
+        "youtube_hash",
+        "mdx_file",
+        "category",
+        "slug",
+        "date",
+        "modDate",
+        "author",
+        "media_type",
+        "media_path",
+        "media_title",
+        "media_alt",
+        "media_aria",
+        "prev_topic_label",
+        "prev_topic_path",
+        "next_topic_label",
+        "next_topic_path",
+    ]:
+        yaml_lines.append(f'{k}: "{_yaml_escape(str(fm_defaults[k]))}"')
+
+    # shorts array
+    yaml_lines.append("shorts:")
+    for clip in shorts:
+        t = clip.get("title") or ""
+        q = clip.get("quote") or ""
+        st = clip.get("start", None)
+        en = clip.get("end", None)
+        kws = clip.get("keywords") or []
+        yaml_lines.append(
+            f'  - {{"title": "{_yaml_escape(t)}", "quote": "{_yaml_escape(q)}", '
+            f'"start": {json.dumps(st)}, "end": {json.dumps(en)}, '
+            f'"keywords": {json.dumps(kws, ensure_ascii=False)} }}'
+        )
+
+    # chapters array (for YouTube chapters, etc.)
+    yaml_lines.append("chapters:")
+    for ch in chapters:
+        title = ch.get("title") or ""
+        anchor = ch.get("anchor") or re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        start = ch.get("start", None)
+        yaml_lines.append(
+            f'  - {{"title": "{_yaml_escape(title)}", "anchor": "{_yaml_escape(anchor)}", '
+            f'"start": {json.dumps(start)} }}'
+        )
+
+    yaml_lines.append("---\n")
+
+    # Body: H1
+    body_lines: List[str] = [f'# {fm_defaults["title"]}\n']
+
+    # Single 1962 Missal reading (only if present)
+    if liturgical_block:
+        body_lines.append(liturgical_block + "\n")
+
+    # TOC
+    if toc:
+        body_lines.append("## Summary of Headings\n")
+        for t in toc:
+            anchor = re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")
+            body_lines.append(f"- [{t}](#{anchor})")
+        body_lines.append("")
+
+    # Insert headings into the homily text locally
+    homily_stripped = homily_text.strip()
+    paras = [p for p in re.split(r"\n\s*\n", homily_stripped) if p.strip()]
+
+    # Map para index -> list of headings
+    ins_map: Dict[int, List[str]] = {}
+    for h in headings:
+        idx = max(0, int(h.get("para_index", 0)))
+        lvl = (h.get("level") or "h2").lower()
+        ttl = h.get("title") or ""
+        tag = "##" if lvl == "h2" else "###"
+        ins_map.setdefault(idx, []).append(f"{tag} {ttl}")
+
+    out_paras: List[str] = []
+    for i, p in enumerate(paras):
+        if i in ins_map:
+            for hdr in ins_map[i]:
+                out_paras.append(hdr)
+        out_paras.append(p)
+
+    # Homily body with headings, preserving 100% of homily text
+    body_lines.append("\n\n".join(out_paras))
+    body_lines.append("")  # spacer
+
+    # End summary (2–3 paragraphs)
+    if summary_paras:
+        body_lines.append("\n## Summary\n")
+        for sp in summary_paras:
+            body_lines.append(sp)
+
+    mdx_page = "\n".join(yaml_lines + body_lines).strip()
     return mdx_page
 
-def generate_mdx_from_json(transcription_json_path):
-    # Load the JSON transcription
+
+# ---------------------------
+# Helpers: extract ONLY the homily
+# ---------------------------
+def extract_homily_from_transcript(
+    transcript: Dict[str, Any],
+    transcription_json_path: str,
+) -> (str, List[Dict[str, Any]]):
+    """
+    Ensure we ONLY work with the homily portion.
+
+    Priority order:
+    1. If transcript already has 'homily_text' and 'homily_segments', use them.
+    2. Else, call your existing find_homily(...) helper to extract homily text + segments.
+    """
+    # Case 1: pre-extracted homily from an upstream script
+    if "homily_text" in transcript and "homily_segments" in transcript:
+        return transcript["homily_text"], transcript["homily_segments"]
+
+    # Case 2: use your finder to locate the homily in the full transcript
+    audio_file = transcript.get("audio_file", "path/to/audio.mp3")
+    working_dir = os.path.dirname(transcription_json_path)
+
+    start, end, text, segments = find_homily(
+        transcript,
+        audio_file=audio_file,
+        working_dir=working_dir,
+    )
+    # 'text' and 'segments' here should already be homily-only
+    return text, segments
+
+
+# ---------------------------
+# CLI wrapper
+# ---------------------------
+def generate_mdx_from_json(transcription_json_path: str) -> str:
+    # Load the JSON transcription (full file, not just homily)
     with open(transcription_json_path, "r", encoding="utf-8") as f:
         transcript = json.load(f)
 
-    # Extract homily text using the find_homily function
-    if "text" in transcript and "segments" in transcript:
-        # This is a pre-prepared manual JSON
-        text = transcript["text"]
-        segments = transcript["segments"]
-    else:
-    # Fall back to automatic find
-        start, end, text, segments = find_homily(transcript, audio_file="path/to/audio.mp3", working_dir=os.path.dirname(transcription_json_path))
+    # Extract ONLY the homily portion + its segments
+    homily_text, homily_segments = extract_homily_from_transcript(
+        transcript, transcription_json_path
+    )
 
-
-    # Generate MDX content
-    mdx_content = mdx_generator(text)
+    # Generate MDX content using only the homily
+    mdx_content = mdx_generator(homily_text, segments=homily_segments)
     return mdx_content
+
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) != 2:
         print("Usage: python mdx_generator.py path/to/transcription.txt.json")
         sys.exit(1)
@@ -167,3 +581,4 @@ if __name__ == "__main__":
     transcription_json_path = sys.argv[1]
     mdx_content = generate_mdx_from_json(transcription_json_path)
     print(mdx_content)
+
