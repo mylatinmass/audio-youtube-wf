@@ -12,7 +12,12 @@ from PIL import Image  # kept, though we no longer use it for thumbnails
 import frontmatter
 from dotenv import load_dotenv
 from get_token import get_and_refresh_google_user_tokens, SCOPES
-from youtube import youtube_list_videos, youtube_upload_video, youtube_update_video, youtube_upload_captions
+from youtube import (
+    youtube_list_videos,
+    youtube_upload_video_with_optional_thumbnail,
+    youtube_update_video,
+    youtube_upload_captions
+)
 from googleapiclient.errors import HttpError
 from txt_to_json import txt_to_json
 import re
@@ -316,6 +321,7 @@ def main():
     if missing_fields:
         raise ValueError(f"Missing required MDX metadata fields: {', '.join(missing_fields)}")
 
+
     # -------------------------------
     # 9. Upload to YouTube
     # -------------------------------
@@ -328,42 +334,51 @@ def main():
         yt_edu_type = metadata.get("youtube_edu_type")
         yt_edu_problems = metadata.get("youtube_edu_problems")  # expect list if present
 
-        upload_response = youtube_upload_video(
-            tokens,
+        # Upload video. The helper handles:
+        # - thumbnail search (ANY image in final folder)
+        # - privacy (public if thumbnail exists else private)
+        # - thumbnail set if found
+        video_id = youtube_upload_video_with_optional_thumbnail(
+            tokens=tokens,
             file_path=final_video_path,
             title=metadata["title"],
             description=metadata["youtube_description"],
-            tags=[t.strip() for t in metadata["keywords"].split(",")],
+            tags=[t.strip() for t in metadata["keywords"].split(",") if t.strip()],
             categoryId=str(yt_category),
-            privacyStatus="public",
-            # Optional Education metadata passthrough (appended to description by uploader helper)
             edu_type=yt_edu_type,
-            edu_problems=yt_edu_problems
+            edu_problems=yt_edu_problems,
         )
-        video_id = upload_response
-        print("Video uploaded successfully. Video ID:", video_id)
 
-        # We skip thumbnail generation/setting for now (you'll add manually later).
+        if not video_id:
+            raise RuntimeError("YouTube upload failed: no video_id returned.")
+
+        print("✅ Video uploaded successfully. Video ID:", video_id)
+
+        # Optional: update title/description (no thumbnail here; helper already handled it)
         update_result = youtube_update_video(
-            tokens,
+            tokens=tokens,
             video_id=video_id,
             new_description=metadata["youtube_description"],
             new_title=metadata["title"],
-            new_thumbnail_path=None  # explicitly no thumbnail
+            new_thumbnail_path=None
         )
         print("Update Response:", update_result)
 
+        # Upload captions
         youtube_upload_captions(tokens, video_id=video_id, caption_file_path=srt_file)
 
+        # Save YouTube ID back into MDX
         post.metadata["media_path"] = video_id
         final_mdx_content = frontmatter.dumps(post)
         with open(final_mdx_path, "w", encoding="utf-8") as f:
             f.write(final_mdx_content)
-        print(f"Final MDX file updated with YouTube ID at: {final_mdx_path}")
+        print(f"✅ Final MDX file updated with YouTube ID at: {final_mdx_path}")
 
+        # Clean up temp
         if os.path.exists(temp_mdx_path):
             os.remove(temp_mdx_path)
 
+        # Push to website repo (optional)
         website_repo = os.getenv("WEBSITE_REPO_PATH")
         if website_repo:
             dest_rel = post.metadata.get("mdx_file")
@@ -376,13 +391,13 @@ def main():
                     subprocess.run(["git", "-C", website_repo, "add", dest_rel], check=True)
                     subprocess.run(["git", "-C", website_repo, "commit", "-m", f"Add {post.metadata['title']}"], check=True)
                     subprocess.run(["git", "-C", website_repo, "push"], check=True)
-                    print("Website content pushed successfully.")
+                    print("✅ Website content pushed successfully.")
                 except subprocess.CalledProcessError as e:
-                    print("Warning: failed to push website content:", e)
+                    print("⚠️ Warning: failed to push website content:", e)
             else:
-                print("mdx_file not specified in metadata; skipping website push.")
+                print("⚠️ mdx_file not specified in metadata; skipping website push.")
         else:
-            print("WEBSITE_REPO_PATH not set; skipping website push.")
+            print("ℹ️ WEBSITE_REPO_PATH not set; skipping website push.")
 
     except Exception as e:
         print("Error:", e)

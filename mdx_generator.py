@@ -3,7 +3,7 @@ import datetime
 import json
 import os
 import re
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import openai
 from text_find import find_homily  # your existing helper
@@ -53,7 +53,6 @@ def infer_mass_hint(homily_text: str) -> Optional[str]:
         suffix = "th" if n in (11, 12, 13) else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
         return f"{n}{suffix}-sunday-in-lent"
 
-    # Common feasts (expand over time)
     FEASTS = [
         ("immaculate conception", "immaculate-conception"),
         ("christ the king", "christ-the-king"),
@@ -79,35 +78,11 @@ def infer_mass_hint(homily_text: str) -> Optional[str]:
 def get_1962_reading(previous_sunday: datetime.date, mass_hint: Optional[str]):
     """
     Return ONE liturgical text (1962 Missal) for the identified Mass, or None.
-
-    Shape:
-    {
-      "label": "Introit" | "Collect" | ...,
-      "text": "“…” (reference)"
-    }
     """
     ymd = previous_sunday.strftime("%Y-%m-%d")
 
-    # ========== START: your curated library (expand over time) ==========
-    by_mass = {
-        # "20th-sunday-after-pentecost": {
-        #     "label": "Communion",
-        #     "text": "“Tu mandasti mandata tua custodiri nimis…” (Ps 118) — Communion (1962 Missal)"
-        # },
-        # "all-saints": {
-        #     "label": "Introit",
-        #     "text": "“Gaudeamus omnes in Domino…” — Introit, Missa Omnium Sanctorum (1962)"
-        # },
-        # "christ-the-king": {
-        #     "label": "Collect",
-        #     "text": "“Omnipotens sempiterne Deus, qui dilecto Filio tuo universorum Rege...” — Collect (1962)"
-        # },
-    }
-
-    by_date = {
-        # "2025-11-02": {"label": "Communion", "text": "…” (ref)"},
-    }
-    # ========== END: your curated library ==========
+    by_mass = {}
+    by_date = {}
 
     if mass_hint and mass_hint in by_mass:
         return by_mass[mass_hint]
@@ -122,18 +97,11 @@ def get_1962_reading(previous_sunday: datetime.date, mass_hint: Optional[str]):
 def _normalize_segments(segments: Optional[List[Any]]) -> List[Dict[str, Any]]:
     """
     Ensure segments are a list of dicts with keys: start, end, text.
-
-    Accepts:
-      - dict segments: {"start": ..., "end": ..., "text": ...}
-      - tuple/list segments, e.g. (start, end, text) or (id, start, end, text)
-
-    This prevents 'AttributeError: tuple object has no attribute get'
-    when upstream code passes tuples instead of dicts.
+    Accepts dicts or tuples/lists.
     """
     normalized: List[Dict[str, Any]] = []
 
     for s in segments or []:
-        # Case 1: already a dict from Whisper/JSON
         if isinstance(s, dict):
             normalized.append({
                 "start": float(s.get("start", 0.0)),
@@ -142,25 +110,21 @@ def _normalize_segments(segments: Optional[List[Any]]) -> List[Dict[str, Any]]:
             })
             continue
 
-        # Case 2: tuple or list
         if isinstance(s, (list, tuple)):
             start = 0.0
             end = 0.0
             text = ""
 
             if len(s) >= 3:
-                # looks like (start, end, text)
                 if isinstance(s[0], (int, float)) and isinstance(s[1], (int, float)):
                     start = s[0]
                     end = s[1]
                     text = s[2]
-                # looks like (id, start, end, text)
                 elif len(s) >= 4 and isinstance(s[1], (int, float)) and isinstance(s[2], (int, float)):
                     start = s[1]
                     end = s[2]
                     text = s[3]
                 else:
-                    # fallback: assume first three = (start, end, text)
                     start, end, text = s[0], s[1], s[2]
 
             normalized.append({
@@ -173,22 +137,116 @@ def _normalize_segments(segments: Optional[List[Any]]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------
+# NEW: Title keywords -> inject into description
+# ---------------------------
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "from", "by",
+    "as", "at", "into", "about", "is", "are", "was", "were", "be", "been", "being",
+}
+
+def _title_keywords(title: str) -> List[str]:
+    # Keep meaningful words; preserve capitalization nicely
+    raw_words = re.findall(r"[A-Za-z0-9']+", (title or ""))
+    words = []
+    for w in raw_words:
+        lw = w.lower()
+        if lw in _STOPWORDS:
+            continue
+        if len(lw) < 4:
+            continue
+        words.append(w.strip("'"))
+    # de-dupe while preserving order
+    out = []
+    seen = set()
+    for w in words:
+        key = w.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(w)
+    return out
+
+
+def inject_title_keywords_into_youtube_description(youtube_description: str, title: str) -> str:
+    """
+    Looks for the subscribe keyword line and appends title-derived keywords to it.
+    Keeps existing keywords intact; avoids duplicates.
+    """
+    if not youtube_description:
+        return youtube_description
+
+    title_kws = _title_keywords(title)
+    if not title_kws:
+        return youtube_description
+
+    # Normalize line endings
+    desc = youtube_description.replace("\r\n", "\n").replace("\r", "\n")
+
+    marker = "Subscribe to this channel for videos about:"
+    idx = desc.find(marker)
+    if idx == -1:
+        # If marker is missing, just append a keywords line at end
+        extra = ", ".join(title_kws)
+        return (desc.rstrip() + "\n\nKeywords: " + extra).strip()
+
+    # Expect the next line to contain the comma-separated keyword list
+    lines = desc.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() == marker:
+            # Next non-empty line
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j >= len(lines):
+                # no keyword line exists; add one
+                lines.append(", ".join(title_kws))
+                return "\n".join(lines).strip()
+
+            existing_line = lines[j].strip()
+            # Parse existing keywords
+            existing = [x.strip() for x in existing_line.split(",") if x.strip()]
+            seen = {x.lower() for x in existing}
+            for kw in title_kws:
+                if kw.lower() not in seen:
+                    existing.append(kw)
+                    seen.add(kw.lower())
+            lines[j] = ", ".join(existing)
+            return "\n".join(lines).strip()
+
+    return desc.strip()
+
+
+# ---------------------------
+# NEW: YAML writers that preserve newlines
+# ---------------------------
+def _yaml_escape_inline(s: str) -> str:
+    return (s or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _yaml_block_scalar(key: str, value: str, indent: int = 0) -> List[str]:
+    """
+    Write YAML block scalar:
+      key: |-
+        line1
+        line2
+    """
+    pad = " " * indent
+    out = [f"{pad}{key}: |-"]
+    # Ensure we always have a string and preserve empty lines
+    value = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    for line in value.split("\n"):
+        out.append(f"{pad}  {line}")
+    return out
+
+
+# ---------------------------
 # Core generator
 # ---------------------------
 def mdx_generator(homily_text: str, segments: Optional[List[Dict[str, Any]]] = None) -> str:
-    """
-    Generates the MDX page structure using ONLY the homily text.
-    - The model returns JSON (front matter, TOC, headings, summary, shorts, chapters).
-    - We assemble final MDX locally, preserving the homily text unchanged
-      (just inserting headings before certain paragraphs).
-    """
-
     today = datetime.date.today()
     previous_sunday = get_previous_sunday(today)
     date_str = previous_sunday.strftime("%Y-%m-%d")
     mod_date_str = today.strftime("%Y-%m-%d")
 
-    # Determine Mass/feast hint from the homily text, then fetch ONE 1962 reading
     mass_hint = infer_mass_hint(homily_text)
     reading = get_1962_reading(previous_sunday, mass_hint)
     liturgical_block = ""
@@ -198,20 +256,17 @@ def mdx_generator(homily_text: str, segments: Optional[List[Dict[str, Any]]] = N
             f"> {reading['text']}\n"
         )
 
-    # Normalize segments first so we can handle dicts OR tuples
     normalized_segments = _normalize_segments(segments)
 
-    # Compact segments to avoid token bloat
     _compact = []
     for s in normalized_segments:
         _compact.append({
             "start": float(s["start"]),
             "end": float(s["end"]),
-            "text": (s["text"] or "")[:120],  # slightly more context for better alignment
+            "text": (s["text"] or "")[:120],
         })
-    segments_json = json.dumps(_compact[:2000], ensure_ascii=False)  # hard cap
+    segments_json = json.dumps(_compact[:2000], ensure_ascii=False)
 
-    # Prompt for JSON only; we assemble MDX locally
     prompt = f"""
 You are an MDX formatter for a Traditional Catholic homily. DO NOT return the homily body.
 Output ONLY a single JSON object with these keys:
@@ -240,16 +295,12 @@ Output ONLY a single JSON object with these keys:
     "next_topic_label": "",
     "next_topic_path": ""
   }},
-  "toc": [
-    "<H2 or H3 title>", "<H2/H3>", "..."
-  ],
+  "toc": ["<H2 or H3 title>", "<H2/H3>", "..."],
   "headings": [
     {{ "para_index": 0, "level": "h2", "title": "<title>" }},
     {{ "para_index": 3, "level": "h3", "title": "<title>" }}
   ],
-  "summary_paragraphs": [
-    "<para 1>", "<para 2>", "<para 3 (optional)>"
-  ],
+  "summary_paragraphs": ["<para 1>", "<para 2>", "<para 3 (optional)>"],
   "shorts": [
     {{
       "title": "<<=80 chars>",
@@ -269,67 +320,39 @@ Output ONLY a single JSON object with these keys:
 }}
 
 STRICT RULES:
-- Use ONLY the HOMILY_TEXT for:
-  - headings,
-  - TOC titles,
-  - summaries,
-  - quotes,
-  - shorts,
-  - chapters.
-  Do NOT invent lines.
+- Use ONLY the HOMILY_TEXT for headings/TOC/summaries/quotes/shorts/chapters. Do NOT invent lines.
 - Do NOT echo or return the homily body anywhere in the JSON.
-- Design subsections so each H2/H3 could stand alone as a short spiritual "mini-article."
-- Prefer clear, punchy titles that can be used as anchor links and YouTube chapter titles.
 
-YOUTUBE DESCRIPTION:
-- youtube_description MUST begin exactly with:
+YOUTUBE DESCRIPTION (IMPORTANT FORMATTING):
+- youtube_description MUST preserve paragraph breaks using blank lines.
+- It MUST begin EXACTLY with these lines (each on its own line):
 
-  Please click on the link to Contribute to our project.
-  https://www.mylatinmass.com/donate
+Please click on the link to Contribute to our project.
+https://www.mylatinmass.com/donate
 
-  Thank you. All contributions are greatly appreciated.
-  - - -
-  ABOUT THIS VIDEO:
+Thank you. All contributions are greatly appreciated.
+- - -
+ABOUT THIS VIDEO:
 
-  Then write EXACTLY three paragraphs:
-  (1) Main thesis + liturgical/scriptural context, referencing the Traditional Latin Mass / Tridentine Mass.
-  (2) 2–3 key insights from the homily.
-  (3) Pastoral application and encouragement for the listener.
+- Then write EXACTLY three paragraphs, separated by ONE blank line between paragraphs.
+- After those three paragraphs, add ONE blank line and then EXACTLY these two lines:
 
-  After those three paragraphs, add a blank line and then EXACTLY this text:
-
-  Subscribe to this channel for videos about:
-  Latin Mass, Traditional Catholic Teaching, Tridentine Mass, SSPX, Our Lady of Victory, Our Lady of the Most Holy Rosary, Saint Philomena, and more...
+Subscribe to this channel for videos about:
+Latin Mass, Traditional Catholic Teaching, Tridentine Mass, SSPX, Our Lady of Victory, Our Lady of the Most Holy Rosary, Saint Philomena, and more...
 
 KEYWORDS:
-- Front matter keywords must include at least these three terms:
-  "Latin Mass", "Tridentine Mass", "Traditional Catholic"
-  plus other relevant tags from the homily.
+- Front matter keywords must include: "Latin Mass", "Tridentine Mass", "Traditional Catholic" + other relevant terms.
 
 HEADINGS & TOC:
-- For "headings", compute paragraph indices by splitting HOMILY_TEXT on blank lines.
-  Insert each heading BEFORE the paragraph at the given index.
-- "toc" should include all H2 and H3 titles in reading order.
+- Paragraph indices come from splitting HOMILY_TEXT on blank lines.
 
-SHORTS:
-- If SEGMENTS_JSON is provided, align the quoted text to segments and compute start/end seconds
-  (~30–45s windows at natural pauses). If you cannot find a good match, set both to null.
+SHORTS/CHAPTERS:
+- If SEGMENTS_JSON is provided, align timing; else set null.
 
-CHAPTERS:
-- Chapters should correspond to the MAJOR H2 sections (and optionally big H3s).
-- Each chapter title should be suitable as a YouTube chapter title.
-- If SEGMENTS_JSON is provided, align each chapter to the approximate start second where
-  that section begins in the audio. If you cannot find it, set start to null.
-- "anchor" should be a kebab-case version of the title (for MDX slug anchors).
-
-CONTEXT FOR PAGE HEADER (INCLUDE ONLY IF PRESENT WHEN ASSEMBLING LOCALLY; DO NOT COPY):
-LITURGICAL_READING_BLOCK:
-{liturgical_block if liturgical_block else "(none)"}
-
-HOMILY_TEXT (unchanged, used only for analysis — do NOT echo back):
+HOMILY_TEXT (do NOT echo back):
 {homily_text}
 
-SEGMENTS_JSON (optional for timing):
+SEGMENTS_JSON:
 {segments_json}
 """
 
@@ -352,19 +375,9 @@ SEGMENTS_JSON (optional for timing):
     )
 
     payload_raw = (response.choices[0].message.content or "").strip()
-
     if not payload_raw:
-        debug_path = os.path.join(os.path.dirname(__file__), "last_model_response.txt")
-        try:
-            with open(debug_path, "w", encoding="utf-8") as dbg:
-                dbg.write(str(response))
-        except Exception:
-            pass
-        raise RuntimeError(
-            "Model returned empty content. Full response saved to last_model_response.txt for inspection."
-        )
+        raise RuntimeError("Model returned empty content.")
 
-    # Strip fences if any
     m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", payload_raw, re.DOTALL)
     if m:
         payload_raw = m.group(1).strip()
@@ -372,15 +385,7 @@ SEGMENTS_JSON (optional for timing):
     try:
         payload = json.loads(payload_raw)
     except json.JSONDecodeError as e:
-        debug_path = os.path.join(os.path.dirname(__file__), "last_model_payload.json.txt")
-        try:
-            with open(debug_path, "w", encoding="utf-8") as dbg:
-                dbg.write(payload_raw)
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"Model did not return valid JSON ({e}). Raw payload saved to {debug_path}."
-        )
+        raise RuntimeError(f"Model did not return valid JSON ({e}).")
 
     fm = payload.get("front_matter", {}) or {}
     toc = payload.get("toc", []) or []
@@ -388,10 +393,6 @@ SEGMENTS_JSON (optional for timing):
     summary_paras = payload.get("summary_paragraphs", []) or []
     shorts = payload.get("shorts", []) or []
     chapters = payload.get("chapters", []) or []
-
-    # Build YAML front matter
-    def _yaml_escape(s: str) -> str:
-        return (s or "").replace('"', '\\"')
 
     kebab = (fm.get("title") or "homily").strip().lower()
     kebab = re.sub(r"[^a-z0-9]+", "-", kebab).strip("-")
@@ -420,13 +421,23 @@ SEGMENTS_JSON (optional for timing):
         "next_topic_path": fm.get("next_topic_path") or "",
     }
 
+    # ✅ FIX #2: Inject title-based keywords into description keyword list
+    fm_defaults["youtube_description"] = inject_title_keywords_into_youtube_description(
+        fm_defaults["youtube_description"],
+        fm_defaults["title"],
+    )
+
+    # ---------------------------
+    # YAML front matter
+    # ---------------------------
     yaml_lines: List[str] = ["---"]
-    for k in [
+
+    # Write most fields inline...
+    inline_keys = [
         "title",
         "description",
         "keywords",
         "youtube_category",
-        "youtube_description",
         "youtube_hash",
         "mdx_file",
         "category",
@@ -443,8 +454,12 @@ SEGMENTS_JSON (optional for timing):
         "prev_topic_path",
         "next_topic_label",
         "next_topic_path",
-    ]:
-        yaml_lines.append(f'{k}: "{_yaml_escape(str(fm_defaults[k]))}"')
+    ]
+    for k in inline_keys:
+        yaml_lines.append(f'{k}: "{_yaml_escape_inline(str(fm_defaults[k]))}"')
+
+    # ✅ FIX #1: write youtube_description as a block scalar to preserve line breaks
+    yaml_lines.extend(_yaml_block_scalar("youtube_description", fm_defaults["youtube_description"]))
 
     # shorts array
     yaml_lines.append("shorts:")
@@ -455,19 +470,19 @@ SEGMENTS_JSON (optional for timing):
         en = clip.get("end", None)
         kws = clip.get("keywords") or []
         yaml_lines.append(
-            f'  - {{"title": "{_yaml_escape(t)}", "quote": "{_yaml_escape(q)}", '
+            f'  - {{"title": "{_yaml_escape_inline(t)}", "quote": "{_yaml_escape_inline(q)}", '
             f'"start": {json.dumps(st)}, "end": {json.dumps(en)}, '
             f'"keywords": {json.dumps(kws, ensure_ascii=False)} }}'
         )
 
-    # chapters array (for YouTube chapters, etc.)
+    # chapters array
     yaml_lines.append("chapters:")
     for ch in chapters:
         title = ch.get("title") or ""
         anchor = ch.get("anchor") or re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
         start = ch.get("start", None)
         yaml_lines.append(
-            f'  - {{"title": "{_yaml_escape(title)}", "anchor": "{_yaml_escape(anchor)}", '
+            f'  - {{"title": "{_yaml_escape_inline(title)}", "anchor": "{_yaml_escape_inline(anchor)}", '
             f'"start": {json.dumps(start)} }}'
         )
 
@@ -476,11 +491,9 @@ SEGMENTS_JSON (optional for timing):
     # Body: H1
     body_lines: List[str] = [f'# {fm_defaults["title"]}\n']
 
-    # Single 1962 Missal reading (only if present)
     if liturgical_block:
         body_lines.append(liturgical_block + "\n")
 
-    # TOC
     if toc:
         body_lines.append("## Summary of Headings\n")
         for t in toc:
@@ -488,11 +501,9 @@ SEGMENTS_JSON (optional for timing):
             body_lines.append(f"- [{t}](#{anchor})")
         body_lines.append("")
 
-    # Insert headings into the homily text locally
     homily_stripped = homily_text.strip()
     paras = [p for p in re.split(r"\n\s*\n", homily_stripped) if p.strip()]
 
-    # Map para index -> list of headings
     ins_map: Dict[int, List[str]] = {}
     for h in headings:
         idx = max(0, int(h.get("para_index", 0)))
@@ -508,11 +519,9 @@ SEGMENTS_JSON (optional for timing):
                 out_paras.append(hdr)
         out_paras.append(p)
 
-    # Homily body with headings, preserving 100% of homily text
     body_lines.append("\n\n".join(out_paras))
-    body_lines.append("")  # spacer
+    body_lines.append("")
 
-    # End summary (2–3 paragraphs)
     if summary_paras:
         body_lines.append("\n## Summary\n")
         for sp in summary_paras:
@@ -528,19 +537,10 @@ SEGMENTS_JSON (optional for timing):
 def extract_homily_from_transcript(
     transcript: Dict[str, Any],
     transcription_json_path: str,
-) -> (str, List[Dict[str, Any]]):
-    """
-    Ensure we ONLY work with the homily portion.
-
-    Priority order:
-    1. If transcript already has 'homily_text' and 'homily_segments', use them.
-    2. Else, call your existing find_homily(...) helper to extract homily text + segments.
-    """
-    # Case 1: pre-extracted homily from an upstream script
+) -> Tuple[str, List[Dict[str, Any]]]:
     if "homily_text" in transcript and "homily_segments" in transcript:
         return transcript["homily_text"], transcript["homily_segments"]
 
-    # Case 2: use your finder to locate the homily in the full transcript
     audio_file = transcript.get("audio_file", "path/to/audio.mp3")
     working_dir = os.path.dirname(transcription_json_path)
 
@@ -549,7 +549,6 @@ def extract_homily_from_transcript(
         audio_file=audio_file,
         working_dir=working_dir,
     )
-    # 'text' and 'segments' here should already be homily-only
     return text, segments
 
 
@@ -557,16 +556,13 @@ def extract_homily_from_transcript(
 # CLI wrapper
 # ---------------------------
 def generate_mdx_from_json(transcription_json_path: str) -> str:
-    # Load the JSON transcription (full file, not just homily)
     with open(transcription_json_path, "r", encoding="utf-8") as f:
         transcript = json.load(f)
 
-    # Extract ONLY the homily portion + its segments
     homily_text, homily_segments = extract_homily_from_transcript(
         transcript, transcription_json_path
     )
 
-    # Generate MDX content using only the homily
     mdx_content = mdx_generator(homily_text, segments=homily_segments)
     return mdx_content
 
@@ -581,4 +577,3 @@ if __name__ == "__main__":
     transcription_json_path = sys.argv[1]
     mdx_content = generate_mdx_from_json(transcription_json_path)
     print(mdx_content)
-
