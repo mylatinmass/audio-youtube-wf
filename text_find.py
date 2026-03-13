@@ -6,8 +6,10 @@ from pydub.utils import mediainfo
 # ─── single source of truth for your liturgical boundary ───
 # matches “holy ghost amen” or “holy spirit amen”
 HOMILY_MARKER = "holy ghost|spirit amen"
-# seconds of silence to mark the end of the homily
-SILENCE_THRESHOLD = 8.0
+# end of homily typically closes with this phrase
+HOMILY_END_MARKER = "in? the? name? of? the father and? of? the son and? of? the holy ghost|spirit amen"
+# occasional alternate ending
+HOMILY_ALT_END_MARKER = "ave maria purisima"
 
 def normalize_text(text):
     """Remove punctuation and lowercase the text."""
@@ -144,13 +146,20 @@ def find_next_word_start(transcript, timestamp):
                 return w['start']
     return None
 
-def find_homily(transcript, marker=HOMILY_MARKER, silence_threshold=SILENCE_THRESHOLD, audio_file=None, working_dir=None):
+def find_homily(
+    transcript,
+    marker=HOMILY_MARKER,
+    end_marker=HOMILY_END_MARKER,
+    alt_end_marker=HOMILY_ALT_END_MARKER,
+    audio_file=None,
+    working_dir=None,
+):
     """
     Locate the homily by:
       1. Finding the opening marker ("holy ghost amen" or "holy spirit amen").
       2. Starting right after that marker.
-      3. Scanning forward until there's a gap of at least `silence_threshold` seconds,
-         which marks the end of the homily.
+      3. Looking for the LAST closing marker from that point onward.
+      4. Falling back to the last transcript word if no closing marker is found.
       4. If marker not found, fall back to manual start/end entry.
     Returns: first, last, homily_text, video_segments
     """
@@ -173,13 +182,27 @@ def find_homily(transcript, marker=HOMILY_MARKER, silence_threshold=SILENCE_THRE
         if not words_after:
             raise RuntimeError("No transcript words found after homily start")
 
-        # 4. Detect silence gap to mark end
-        last = None
-        for prev, curr in zip(words_after, words_after[1:]):
-            if curr['start'] - prev['end'] >= silence_threshold:
-                last = prev['end']
-                break
-        if last is None:
+        # 4. Find the last closing marker; otherwise use the very last word.
+        end_window = {
+            'segments': [
+                {
+                    'words': [w for w in seg.get('words', []) if w['start'] >= first]
+                }
+                for seg in transcript.get('segments', [])
+            ]
+        }
+        close_start, close_end = find_phrase_timestamps(end_window, end_marker, backwards=True)
+        alt_start, alt_end = find_phrase_timestamps(end_window, alt_end_marker, backwards=True)
+
+        close_candidates = []
+        if close_end is not None:
+            close_candidates.append((close_start, close_end))
+        if alt_end is not None:
+            close_candidates.append((alt_start, alt_end))
+
+        if close_candidates:
+            _, last = max(close_candidates, key=lambda item: item[1])
+        else:
             last = words_after[-1]['end']
 
         # Build trimmed segments

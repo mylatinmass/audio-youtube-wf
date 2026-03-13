@@ -494,23 +494,44 @@ SEGMENTS_JSON:
     if liturgical_block:
         body_lines.append(liturgical_block + "\n")
 
-    if toc:
-        body_lines.append("## Summary of Headings\n")
-        for t in toc:
-            anchor = re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")
-            body_lines.append(f"- [{t}](#{anchor})")
-        body_lines.append("")
-
     homily_stripped = homily_text.strip()
     paras = [p for p in re.split(r"\n\s*\n", homily_stripped) if p.strip()]
+    if not paras:
+        paras = [""]
+
+    normalized_headings: List[Dict[str, Any]] = []
+    for h in headings or []:
+        title = str(h.get("title") or "").strip()
+        if not title:
+            continue
+        try:
+            idx = int(h.get("para_index", 0))
+        except (TypeError, ValueError):
+            idx = 0
+        lvl = str(h.get("level") or "h2").lower()
+        if lvl not in ("h2", "h3"):
+            lvl = "h2"
+        normalized_headings.append({"title": title, "level": lvl, "para_index": idx})
+
+    # Fallback: if the model returns TOC but no usable headings, build headings from TOC.
+    if not normalized_headings and toc:
+        for i, t in enumerate(toc):
+            title = str(t or "").strip()
+            if not title:
+                continue
+            normalized_headings.append({
+                "title": title,
+                "level": "h2",
+                "para_index": min(i, len(paras) - 1),
+            })
 
     ins_map: Dict[int, List[str]] = {}
-    for h in headings:
-        idx = max(0, int(h.get("para_index", 0)))
-        lvl = (h.get("level") or "h2").lower()
-        ttl = h.get("title") or ""
-        tag = "##" if lvl == "h2" else "###"
-        ins_map.setdefault(idx, []).append(f"{tag} {ttl}")
+    rendered_heading_titles: List[str] = []
+    for h in normalized_headings:
+        idx = max(0, min(int(h["para_index"]), len(paras) - 1))
+        tag = "##" if h["level"] == "h2" else "###"
+        ins_map.setdefault(idx, []).append(f"{tag} {h['title']}")
+        rendered_heading_titles.append(h["title"])
 
     out_paras: List[str] = []
     for i, p in enumerate(paras):
@@ -518,6 +539,21 @@ SEGMENTS_JSON:
             for hdr in ins_map[i]:
                 out_paras.append(hdr)
         out_paras.append(p)
+
+    toc_source = [str(t).strip() for t in (toc or rendered_heading_titles) if str(t).strip()]
+    if toc_source:
+        body_lines.append("## Summary of Headings\n")
+        for t in toc_source:
+            anchor = re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")
+            body_lines.append(f"- [{t}](#{anchor})")
+        body_lines.append("")
+
+        # Guarantee each TOC anchor exists in the body.
+        existing = {t.lower() for t in rendered_heading_titles}
+        for t in toc_source:
+            if t.lower() not in existing:
+                out_paras.append(f"## {t}")
+                existing.add(t.lower())
 
     body_lines.append("\n\n".join(out_paras))
     body_lines.append("")

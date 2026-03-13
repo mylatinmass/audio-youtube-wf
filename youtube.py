@@ -12,6 +12,126 @@ from get_token import get_and_refresh_google_user_tokens, SCOPES
 # Load environment variables (if using a .env file)
 load_dotenv()
 
+BASE_DISCOVERY_TOPICS = [
+    "Latin Mass",
+    "Traditional Catholic Teaching",
+    "Tridentine Mass",
+    "SSPX",
+    "Our Lady of Victory",
+    "Our Lady of the Most Holy Rosary",
+    "Saint Philomena",
+]
+
+
+def _dedupe_keep_order(values):
+    out = []
+    seen = set()
+    for v in values or []:
+        s = str(v or "").strip()
+        if not s:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+def _format_ts(seconds):
+    s = max(0, int(round(float(seconds))))
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    if h:
+        return f"{h:d}:{m:02d}:{sec:02d}"
+    return f"{m:d}:{sec:02d}"
+
+
+def _parse_chapters(chapters):
+    parsed = []
+    for ch in chapters or []:
+        if not isinstance(ch, dict):
+            continue
+        title = str(ch.get("title", "")).strip()
+        start = ch.get("start")
+        if not title or start is None:
+            continue
+        try:
+            parsed.append({"title": title, "start": float(start)})
+        except (TypeError, ValueError):
+            continue
+    return sorted(parsed, key=lambda x: x["start"])
+
+
+def prepare_youtube_description(description, tags=None, chapters=None, chapter_offset_sec=11.0):
+    """
+    Prepare a discoverability-focused YouTube description.
+    - Ensures a keyword subscribe block with fixed baseline + video-specific keywords.
+    - Appends chapter timestamps from MDX chapters when available.
+    """
+    desc = (description or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    tags = _dedupe_keep_order(tags or [])
+
+    base_set = {x.lower() for x in BASE_DISCOVERY_TOPICS}
+    unique_video_terms = [t for t in tags if t.lower() not in base_set]
+    keyword_line = ", ".join(BASE_DISCOVERY_TOPICS + unique_video_terms) + ", and more..."
+
+    marker = "Subscribe to this channel for videos about:"
+    if marker in desc:
+        lines = desc.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip() != marker:
+                continue
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines):
+                lines[j] = keyword_line
+            else:
+                lines.append(keyword_line)
+            desc = "\n".join(lines).strip()
+            break
+    else:
+        block = f"{marker}\n{keyword_line}"
+        desc = f"{desc}\n\n{block}".strip() if desc else block
+
+    parsed_chapters = _parse_chapters(chapters)
+    if parsed_chapters and "Chapters:" not in desc:
+        chapter_lines = ["Chapters:", "00:00 Introduction"]
+        used_ts = {"00:00"}
+        for ch in parsed_chapters:
+            if ch["start"] <= 0 and ch["title"].strip().lower() == "introduction":
+                continue
+            ts = _format_ts(ch["start"] + float(chapter_offset_sec))
+            if ts in used_ts:
+                continue
+            used_ts.add(ts)
+            chapter_lines.append(f"{ts} {ch['title']}")
+        desc = f"{desc}\n\n" + "\n".join(chapter_lines)
+
+    return desc.strip()
+
+
+def finalize_youtube_description(
+    description,
+    tags=None,
+    chapters=None,
+    chapter_offset_sec=11.0,
+    edu_type=None,
+    edu_problems=None,
+):
+    """
+    Build the exact description payload sent to YouTube.
+    """
+    final_description = prepare_youtube_description(
+        description=description,
+        tags=tags,
+        chapters=chapters,
+        chapter_offset_sec=chapter_offset_sec,
+    )
+    return _append_edu_block_to_description(final_description, edu_type, edu_problems)
+
 
 def find_thumbnail_in_final_folder(final_video_path):
     """
@@ -110,6 +230,8 @@ def youtube_upload_video(
     privacyStatus="public",
     edu_type=None,
     edu_problems=None,
+    chapters=None,
+    chapter_offset_sec=11.0,
 ):
     """
     Uploads a video to YouTube.
@@ -119,7 +241,14 @@ def youtube_upload_video(
     """
     youtube = build_youtube_service(tokens)
 
-    final_description = _append_edu_block_to_description(description, edu_type, edu_problems)
+    final_description = finalize_youtube_description(
+        description=description,
+        tags=tags,
+        chapters=chapters,
+        chapter_offset_sec=chapter_offset_sec,
+        edu_type=edu_type,
+        edu_problems=edu_problems,
+    )
 
     body = {
         "snippet": {
@@ -169,6 +298,8 @@ def youtube_upload_video_with_optional_thumbnail(
     categoryId="27",
     edu_type=None,
     edu_problems=None,
+    chapters=None,
+    chapter_offset_sec=11.0,
 ):
     """
     RULE:
@@ -177,6 +308,13 @@ def youtube_upload_video_with_optional_thumbnail(
     """
     thumbnail_path = find_thumbnail_in_final_folder(file_path)
     privacyStatus = "public" if thumbnail_path else "private"
+
+    if thumbnail_path:
+        print(f"Thumbnail found in final folder: {thumbnail_path}")
+        print("Uploading video as PUBLIC.")
+    else:
+        print("No thumbnail found in final folder.")
+        print("Uploading video as PRIVATE draft so you can add the thumbnail before publishing.")
 
     # ✅ FIX: call youtube_upload_video (not this function)
     video_id = youtube_upload_video(
@@ -189,6 +327,8 @@ def youtube_upload_video_with_optional_thumbnail(
         privacyStatus=privacyStatus,
         edu_type=edu_type,
         edu_problems=edu_problems,
+        chapters=chapters,
+        chapter_offset_sec=chapter_offset_sec,
     )
 
     if not video_id:

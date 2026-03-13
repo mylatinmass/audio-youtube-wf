@@ -1,0 +1,939 @@
+{
+  "text": " Veni, Thea, Tos, Filitus, ente sua orum visita. Veni, Thea, Tos, Filitus, ente sua orum visita. Tu senti volnismu nere, viscus paternere sere, turite promisum patis, se volnetit ansu turna. Acete lumen sensibus in funda voler coribus, in firma nostrii corponis, virgute firma anser eteris. Ostem mebe las logimus, acemque dones gradimus, dutores in terebio, fidelus otero ximum. Perdeciamus tabate, nostra musa te filim, teque utilius per estilim, credamus omni tempore. Deo Patris in Gloria et Filio Pia volumis, sur respita carabino in seculorum sepulna. Amen.",
+  "segments": [
+    {
+      "id": 0,
+      "seek": 0,
+      "start": 8.16,
+      "end": 28.72,
+      "text": " Veni, Thea, Tos, Filitus, ente sua orum visita. Veni, Thea, Tos, Filitus, ente sua orum visita.",
+      "tokens": [
+        50365,
+        11182,
+        72,
+        11,
+        440,
+        64,
+        11,
+        314,
+        329,
+        11,
+        7905,
+        30973,
+        11,
+        948,
+        68,
+        8233,
+        420,
+        449,
+        1452,
+        2786,
+        13,
+        11182,
+        72,
+        11,
+        440,
+        64,
+        11,
+        314,
+        329,
+        11,
+        7905,
+        30973,
+        11,
+        948,
+        68,
+        8233,
+        420,
+        449,
+        1452,
+        2786,
+        13,
+        51315
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.4934071194041859,
+      "compression_ratio": 1.6964285714285714,
+      "no_speech_prob": 0.0014846272533759475,
+      "words": [
+        {
+          "word": " Veni,",
+          "start": 8.16,
+          "end": 9.56,
+          "probability": 0.6072725653648376
+        },
+        {
+          "word": " Thea,",
+          "start": 9.56,
+          "end": 10.5,
+          "probability": 0.7047988772392273
+        },
+        {
+          "word": " Tos,",
+          "start": 10.5,
+          "end": 11.14,
+          "probability": 0.3691611886024475
+        },
+        {
+          "word": " Filitus,",
+          "start": 11.14,
+          "end": 13.02,
+          "probability": 0.1821812465786934
+        },
+        {
+          "word": " ente",
+          "start": 13.02,
+          "end": 14.36,
+          "probability": 0.49682240188121796
+        },
+        {
+          "word": " sua",
+          "start": 14.36,
+          "end": 14.8,
+          "probability": 0.14479264616966248
+        },
+        {
+          "word": " orum",
+          "start": 14.8,
+          "end": 15.84,
+          "probability": 0.5136047080159187
+        },
+        {
+          "word": " visita.",
+          "start": 15.84,
+          "end": 17.5,
+          "probability": 0.9697867929935455
+        },
+        {
+          "word": " Veni,",
+          "start": 18.66,
+          "end": 20.06,
+          "probability": 0.49072332854848355
+        },
+        {
+          "word": " Thea,",
+          "start": 20.48,
+          "end": 21.2,
+          "probability": 0.9785200655460358
+        },
+        {
+          "word": " Tos,",
+          "start": 21.2,
+          "end": 24.1,
+          "probability": 0.9615664482116699
+        },
+        {
+          "word": " Filitus,",
+          "start": 24.1,
+          "end": 25.02,
+          "probability": 0.9853295683860779
+        },
+        {
+          "word": " ente",
+          "start": 25.02,
+          "end": 26.88,
+          "probability": 0.9888183772563934
+        },
+        {
+          "word": " sua",
+          "start": 26.88,
+          "end": 27.56,
+          "probability": 0.9985451698303223
+        },
+        {
+          "word": " orum",
+          "start": 27.56,
+          "end": 28.18,
+          "probability": 0.9987558722496033
+        },
+        {
+          "word": " visita.",
+          "start": 28.18,
+          "end": 28.72,
+          "probability": 0.9969204068183899
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "seek": 5872,
+      "start": 59.480000000000004,
+      "end": 84.82,
+      "text": " Tu senti volnismu nere, viscus paternere sere, turite promisum patis, se volnetit ansu turna.",
+      "tokens": [
+        50365,
+        7836,
+        2279,
+        72,
+        1996,
+        77,
+        1434,
+        84,
+        297,
+        323,
+        11,
+        1452,
+        1149,
+        42302,
+        77,
+        323,
+        262,
+        323,
+        11,
+        3243,
+        642,
+        2234,
+        271,
+        449,
+        1947,
+        271,
+        11,
+        369,
+        1996,
+        7129,
+        270,
+        1567,
+        84,
+        3243,
+        629,
+        13,
+        51682
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.7648052802452674,
+      "compression_ratio": 1.2077922077922079,
+      "no_speech_prob": 0.8168796896934509,
+      "words": [
+        {
+          "word": " Tu",
+          "start": 59.480000000000004,
+          "end": 60.88,
+          "probability": 0.5530165433883667
+        },
+        {
+          "word": " senti",
+          "start": 60.88,
+          "end": 61.86,
+          "probability": 0.7353920042514801
+        },
+        {
+          "word": " volnismu",
+          "start": 61.86,
+          "end": 64.06,
+          "probability": 0.42753009498119354
+        },
+        {
+          "word": " nere,",
+          "start": 64.06,
+          "end": 64.82,
+          "probability": 0.43296994268894196
+        },
+        {
+          "word": " viscus",
+          "start": 65.14,
+          "end": 66.76,
+          "probability": 0.2789768576622009
+        },
+        {
+          "word": " paternere",
+          "start": 66.76,
+          "end": 68.32,
+          "probability": 0.7374614477157593
+        },
+        {
+          "word": " sere,",
+          "start": 68.32,
+          "end": 69.84,
+          "probability": 0.8170702159404755
+        },
+        {
+          "word": " turite",
+          "start": 70.44,
+          "end": 74.08,
+          "probability": 0.580467164516449
+        },
+        {
+          "word": " promisum",
+          "start": 74.08,
+          "end": 77.02,
+          "probability": 0.7327071229616801
+        },
+        {
+          "word": " patis,",
+          "start": 77.02,
+          "end": 78.34,
+          "probability": 0.48227325081825256
+        },
+        {
+          "word": " se",
+          "start": 78.34,
+          "end": 79.14,
+          "probability": 0.29256296157836914
+        },
+        {
+          "word": " volnetit",
+          "start": 79.14,
+          "end": 81.52,
+          "probability": 0.3642252782980601
+        },
+        {
+          "word": " ansu",
+          "start": 81.52,
+          "end": 83.5,
+          "probability": 0.5900078415870667
+        },
+        {
+          "word": " turna.",
+          "start": 83.5,
+          "end": 84.82,
+          "probability": 0.31418074667453766
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "seek": 8482,
+      "start": 87.65999999999998,
+      "end": 99.22,
+      "text": " Acete lumen sensibus in funda voler coribus,",
+      "tokens": [
+        50365,
+        5097,
+        3498,
+        287,
+        16988,
+        2923,
+        897,
+        301,
+        294,
+        2374,
+        64,
+        1996,
+        260,
+        1181,
+        897,
+        301,
+        11,
+        51092
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.5514451403950535,
+      "compression_ratio": 1.2073170731707317,
+      "no_speech_prob": 0.8012029528617859,
+      "words": [
+        {
+          "word": " Acete",
+          "start": 87.65999999999998,
+          "end": 89.05999999999999,
+          "probability": 0.5499397367238998
+        },
+        {
+          "word": " lumen",
+          "start": 89.05999999999999,
+          "end": 90.46,
+          "probability": 0.7530222833156586
+        },
+        {
+          "word": " sensibus",
+          "start": 90.46,
+          "end": 93.34,
+          "probability": 0.9769638776779175
+        },
+        {
+          "word": " in",
+          "start": 93.34,
+          "end": 93.9,
+          "probability": 0.5214808583259583
+        },
+        {
+          "word": " funda",
+          "start": 93.9,
+          "end": 94.68,
+          "probability": 0.7110768258571625
+        },
+        {
+          "word": " voler",
+          "start": 94.68,
+          "end": 95.88,
+          "probability": 0.40470752120018005
+        },
+        {
+          "word": " coribus,",
+          "start": 95.88,
+          "end": 99.22,
+          "probability": 0.7148349086443583
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "seek": 8482,
+      "start": 99.22,
+      "end": 113.34,
+      "text": " in firma nostrii corponis, virgute firma anser eteris.",
+      "tokens": [
+        51092,
+        294,
+        12159,
+        1696,
+        10397,
+        470,
+        72,
+        1181,
+        79,
+        266,
+        271,
+        11,
+        4107,
+        70,
+        1169,
+        12159,
+        1696,
+        1567,
+        260,
+        1030,
+        260,
+        271,
+        13,
+        51842
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.5514451403950535,
+      "compression_ratio": 1.2073170731707317,
+      "no_speech_prob": 0.8012029528617859,
+      "words": [
+        {
+          "word": " in",
+          "start": 99.22,
+          "end": 100.78,
+          "probability": 0.7285798192024231
+        },
+        {
+          "word": " firma",
+          "start": 100.78,
+          "end": 102.5,
+          "probability": 0.6716322600841522
+        },
+        {
+          "word": " nostrii",
+          "start": 102.5,
+          "end": 104.16,
+          "probability": 0.7855016589164734
+        },
+        {
+          "word": " corponis,",
+          "start": 104.16,
+          "end": 106.48,
+          "probability": 0.6049344167113304
+        },
+        {
+          "word": " virgute",
+          "start": 106.48,
+          "end": 108.58,
+          "probability": 0.8361246188481649
+        },
+        {
+          "word": " firma",
+          "start": 108.58,
+          "end": 110.12,
+          "probability": 0.9593601524829865
+        },
+        {
+          "word": " anser",
+          "start": 110.12,
+          "end": 111.72,
+          "probability": 0.3948197215795517
+        },
+        {
+          "word": " eteris.",
+          "start": 111.72,
+          "end": 113.34,
+          "probability": 0.34773783882459003
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "seek": 11482,
+      "start": 115.67999999999999,
+      "end": 127.74,
+      "text": " Ostem mebe las logimus, acemque dones gradimus,",
+      "tokens": [
+        50365,
+        422,
+        1099,
+        385,
+        650,
+        2439,
+        3565,
+        332,
+        301,
+        11,
+        696,
+        443,
+        1077,
+        500,
+        279,
+        2771,
+        332,
+        301,
+        11,
+        51016
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.8065076428790425,
+      "compression_ratio": 1.1139240506329113,
+      "no_speech_prob": 0.7424854636192322,
+      "words": [
+        {
+          "word": " Ostem",
+          "start": 115.67999999999999,
+          "end": 117.08,
+          "probability": 0.4759865701198578
+        },
+        {
+          "word": " mebe",
+          "start": 117.08,
+          "end": 118.12,
+          "probability": 0.1922338753938675
+        },
+        {
+          "word": " las",
+          "start": 118.12,
+          "end": 118.86,
+          "probability": 0.8315269947052002
+        },
+        {
+          "word": " logimus,",
+          "start": 118.86,
+          "end": 121.36,
+          "probability": 0.5233723868926367
+        },
+        {
+          "word": " acemque",
+          "start": 121.36,
+          "end": 122.88,
+          "probability": 0.32807862261931103
+        },
+        {
+          "word": " dones",
+          "start": 122.88,
+          "end": 124.22,
+          "probability": 0.43086908757686615
+        },
+        {
+          "word": " gradimus,",
+          "start": 124.22,
+          "end": 127.74,
+          "probability": 0.6807622015476227
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "seek": 11482,
+      "start": 129.42,
+      "end": 141.58,
+      "text": " dutores in terebio, fidelus otero ximum.",
+      "tokens": [
+        51016,
+        274,
+        325,
+        2706,
+        294,
+        256,
+        323,
+        65,
+        1004,
+        11,
+        283,
+        16189,
+        301,
+        277,
+        391,
+        78,
+        2031,
+        332,
+        449,
+        13,
+        51766
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.8065076428790425,
+      "compression_ratio": 1.1139240506329113,
+      "no_speech_prob": 0.7424854636192322,
+      "words": [
+        {
+          "word": " dutores",
+          "start": 129.42,
+          "end": 130.82,
+          "probability": 0.6745016078154246
+        },
+        {
+          "word": " in",
+          "start": 130.82,
+          "end": 131.86,
+          "probability": 0.4996863305568695
+        },
+        {
+          "word": " terebio,",
+          "start": 131.86,
+          "end": 134.26,
+          "probability": 0.7386745437979698
+        },
+        {
+          "word": " fidelus",
+          "start": 134.68,
+          "end": 137.64,
+          "probability": 0.7249213655789694
+        },
+        {
+          "word": " otero",
+          "start": 137.64,
+          "end": 139.84,
+          "probability": 0.5412476609150568
+        },
+        {
+          "word": " ximum.",
+          "start": 139.84,
+          "end": 141.58,
+          "probability": 0.40751466651757556
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "seek": 14158,
+      "start": 146.26,
+      "end": 154.24,
+      "text": " Perdeciamus tabate, nostra musa te filim,",
+      "tokens": [
+        50365,
+        3026,
+        1479,
+        537,
+        45897,
+        4421,
+        473,
+        11,
+        34311,
+        1038,
+        64,
+        535,
+        1387,
+        332,
+        11,
+        51015
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.9056373395417866,
+      "compression_ratio": 1.1518987341772151,
+      "no_speech_prob": 0.8102700114250183,
+      "words": [
+        {
+          "word": " Perdeciamus",
+          "start": 146.26,
+          "end": 147.66,
+          "probability": 0.5012603178620338
+        },
+        {
+          "word": " tabate,",
+          "start": 147.66,
+          "end": 149.06,
+          "probability": 0.43558234721422195
+        },
+        {
+          "word": " nostra",
+          "start": 149.36,
+          "end": 150.88,
+          "probability": 0.41332176327705383
+        },
+        {
+          "word": " musa",
+          "start": 150.88,
+          "end": 151.84,
+          "probability": 0.3834153115749359
+        },
+        {
+          "word": " te",
+          "start": 151.84,
+          "end": 152.08,
+          "probability": 0.8024163842201233
+        },
+        {
+          "word": " filim,",
+          "start": 152.08,
+          "end": 154.24,
+          "probability": 0.4710031598806381
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "seek": 14158,
+      "start": 157.56,
+      "end": 162.56,
+      "text": " teque utilius per estilim,",
+      "tokens": [
+        51015,
+        535,
+        1077,
+        2839,
+        2312,
+        301,
+        680,
+        871,
+        388,
+        332,
+        11,
+        51415
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.9056373395417866,
+      "compression_ratio": 1.1518987341772151,
+      "no_speech_prob": 0.8102700114250183,
+      "words": [
+        {
+          "word": " teque",
+          "start": 157.56,
+          "end": 158.96,
+          "probability": 0.743975430727005
+        },
+        {
+          "word": " utilius",
+          "start": 158.96,
+          "end": 160.36,
+          "probability": 0.6386962135632833
+        },
+        {
+          "word": " per",
+          "start": 160.36,
+          "end": 160.62,
+          "probability": 0.42251431941986084
+        },
+        {
+          "word": " estilim,",
+          "start": 160.62,
+          "end": 162.56,
+          "probability": 0.4943721642096837
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "seek": 14158,
+      "start": 163.88000000000002,
+      "end": 169.14,
+      "text": " credamus omni tempore.",
+      "tokens": [
+        51480,
+        3864,
+        45897,
+        3406,
+        3722,
+        18274,
+        418,
+        13,
+        51760
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.9056373395417866,
+      "compression_ratio": 1.1518987341772151,
+      "no_speech_prob": 0.8102700114250183,
+      "words": [
+        {
+          "word": " credamus",
+          "start": 163.88000000000002,
+          "end": 165.2,
+          "probability": 0.4311090558767319
+        },
+        {
+          "word": " omni",
+          "start": 165.2,
+          "end": 166.56,
+          "probability": 0.5345814973115921
+        },
+        {
+          "word": " tempore.",
+          "start": 166.56,
+          "end": 169.14,
+          "probability": 0.7756702303886414
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "seek": 17158,
+      "start": 171.92,
+      "end": 182.84,
+      "text": " Deo Patris in Gloria et Filio Pia volumis,",
+      "tokens": [
+        50365,
+        1346,
+        78,
+        4379,
+        5714,
+        294,
+        34288,
+        1030,
+        7905,
+        1004,
+        430,
+        654,
+        1996,
+        449,
+        271,
+        11,
+        50973
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.5907780329386393,
+      "compression_ratio": 1.0625,
+      "no_speech_prob": 0.6049304604530334,
+      "words": [
+        {
+          "word": " Deo",
+          "start": 171.92,
+          "end": 173.32,
+          "probability": 0.9729805588722229
+        },
+        {
+          "word": " Patris",
+          "start": 173.32,
+          "end": 174.72,
+          "probability": 0.7029353380203247
+        },
+        {
+          "word": " in",
+          "start": 174.72,
+          "end": 175.16,
+          "probability": 0.17925187945365906
+        },
+        {
+          "word": " Gloria",
+          "start": 175.16,
+          "end": 176.44,
+          "probability": 0.4994087517261505
+        },
+        {
+          "word": " et",
+          "start": 176.44,
+          "end": 178.14,
+          "probability": 0.7018808722496033
+        },
+        {
+          "word": " Filio",
+          "start": 178.14,
+          "end": 179.36,
+          "probability": 0.8401024639606476
+        },
+        {
+          "word": " Pia",
+          "start": 179.36,
+          "end": 180.16,
+          "probability": 0.6617208421230316
+        },
+        {
+          "word": " volumis,",
+          "start": 180.16,
+          "end": 182.84,
+          "probability": 0.6802631666262945
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "seek": 17158,
+      "start": 183.74,
+      "end": 197.34,
+      "text": " sur respita carabino in seculorum sepulna.",
+      "tokens": [
+        50973,
+        1022,
+        1597,
+        2786,
+        1032,
+        455,
+        2982,
+        294,
+        907,
+        425,
+        36543,
+        369,
+        79,
+        425,
+        629,
+        13,
+        51671
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.5907780329386393,
+      "compression_ratio": 1.0625,
+      "no_speech_prob": 0.6049304604530334,
+      "words": [
+        {
+          "word": " sur",
+          "start": 183.74,
+          "end": 185.22,
+          "probability": 0.7117518186569214
+        },
+        {
+          "word": " respita",
+          "start": 185.22,
+          "end": 187.62,
+          "probability": 0.5874455124139786
+        },
+        {
+          "word": " carabino",
+          "start": 187.62,
+          "end": 190.08,
+          "probability": 0.7090356945991516
+        },
+        {
+          "word": " in",
+          "start": 190.08,
+          "end": 191.58,
+          "probability": 0.9146708250045776
+        },
+        {
+          "word": " seculorum",
+          "start": 191.58,
+          "end": 194.08,
+          "probability": 0.7222412427266439
+        },
+        {
+          "word": " sepulna.",
+          "start": 194.08,
+          "end": 197.34,
+          "probability": 0.5956668257713318
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "seek": 19734,
+      "start": 201.1,
+      "end": 202.5,
+      "text": " Amen.",
+      "tokens": [
+        50365,
+        14092,
+        13,
+        50665
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.5124983310699462,
+      "compression_ratio": 0.38461538461538464,
+      "no_speech_prob": 0.5156352519989014,
+      "words": [
+        {
+          "word": " Amen.",
+          "start": 201.1,
+          "end": 202.5,
+          "probability": 0.9105724096298218
+        }
+      ]
+    }
+  ],
+  "language": "la"
+}

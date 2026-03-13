@@ -16,7 +16,9 @@ from youtube import (
     youtube_list_videos,
     youtube_upload_video_with_optional_thumbnail,
     youtube_update_video,
-    youtube_upload_captions
+    youtube_upload_captions,
+    finalize_youtube_description,
+    prepare_youtube_description,
 )
 from googleapiclient.errors import HttpError
 from txt_to_json import txt_to_json
@@ -67,6 +69,29 @@ def resolve_final_mdx_path_from_front(front: dict, default_dir: str) -> str:
     os.makedirs(os.path.dirname(target), exist_ok=True)
     return target
 
+
+def resolve_website_mdx_relpath(metadata: dict) -> str:
+    """
+    Resolve canonical MDX destination inside website repo.
+    Priority:
+      1) metadata.mdx_file
+      2) metadata.category + slug-derived filename
+      3) src/mds/lectures/homily.mdx
+    """
+    mdx_file = str(metadata.get("mdx_file") or "").strip()
+    if mdx_file:
+        return mdx_file.lstrip("/\\")
+
+    category = str(metadata.get("category") or "lectures").strip().strip("/\\")
+    slug = str(metadata.get("slug") or "").strip()
+    if slug.startswith("/"):
+        slug = slug[1:]
+    base = slug if slug else "homily"
+    if not base.endswith(".mdx"):
+        base += ".mdx"
+
+    return os.path.join("src", "mds", category or "lectures", base)
+
 # Prompt user for audio file ONLY (no image)
 def prompt_user():
     audio_file = clean_path(input("Enter AUDIO FILE PATH (e.g., /path/to/audio.mp3): ").strip())
@@ -77,6 +102,102 @@ def prompt_user():
 def clean_path(path):
     """Removes leading/trailing spaces and handles unnecessary quotes."""
     return path.strip().strip('"').strip("'")
+
+
+def generate_mdx_artifacts(homily_json_path, working_dir, final_output_dir):
+    temp_mdx_path = os.path.join(working_dir, "homily_temp.mdx")
+
+    print("Generating MDX file...")
+    mdx_generator_script = os.path.abspath("./mdx_generator.py")
+    result = subprocess.run(
+        ["python", mdx_generator_script, homily_json_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print(result.stderr)
+        raise RuntimeError(f"mdx_generator.py failed with return code {result.returncode}")
+
+    lines_to_ignore = ("Found phrase", "The main part", "Phrase not found", "Homily text:")
+    cleaned_output = []
+    capture = False
+    for line in result.stdout.splitlines():
+        if not capture and line.strip().startswith("---"):
+            capture = True
+        if capture and not line.startswith(lines_to_ignore):
+            cleaned_output.append(line)
+
+    mdx_text = "\n".join(cleaned_output).strip()
+    if not mdx_text:
+        raise RuntimeError("MDX generation failed: empty output")
+
+    with open(temp_mdx_path, "w", encoding="utf-8") as mdx_file:
+        mdx_file.write(mdx_text)
+
+    front = parse_front_matter_block(mdx_text)
+    final_mdx_path = resolve_final_mdx_path_from_front(front, final_output_dir)
+
+    if os.path.exists(final_mdx_path):
+        print(f"Final MDX already exists at: {final_mdx_path}; skipping write.")
+    else:
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=os.path.dirname(final_mdx_path), suffix=".mdx", encoding="utf-8") as tf:
+            tf.write(mdx_text)
+            tmp_final = tf.name
+        os.replace(tmp_final, final_mdx_path)
+
+    print(f"✅ Clean MDX file generated at: {final_mdx_path}")
+
+    post = frontmatter.load(final_mdx_path)
+    metadata = post.metadata
+    print("Metadata:", metadata)
+
+    required_fields = ["title", "youtube_description", "keywords"]
+    missing_fields = [field for field in required_fields if not metadata.get(field)]
+    if missing_fields:
+        raise ValueError(f"Missing required MDX metadata fields: {', '.join(missing_fields)}")
+
+    return temp_mdx_path, final_mdx_path, post
+
+
+def build_youtube_payload(metadata):
+    yt_category = metadata.get("youtube_category_id", "27")
+    yt_edu_type = metadata.get("youtube_edu_type")
+    yt_edu_problems = metadata.get("youtube_edu_problems")
+    yt_tags = [t.strip() for t in metadata["keywords"].split(",") if t.strip()]
+    yt_chapters = metadata.get("chapters", [])
+    yt_prepared_description = prepare_youtube_description(
+        description=metadata["youtube_description"],
+        tags=yt_tags,
+        chapters=yt_chapters,
+        chapter_offset_sec=11.0,
+    )
+    yt_final_description = finalize_youtube_description(
+        description=metadata["youtube_description"],
+        tags=yt_tags,
+        chapters=yt_chapters,
+        chapter_offset_sec=11.0,
+        edu_type=yt_edu_type,
+        edu_problems=yt_edu_problems,
+    )
+    return {
+        "category": str(yt_category),
+        "edu_type": yt_edu_type,
+        "edu_problems": yt_edu_problems,
+        "tags": yt_tags,
+        "chapters": yt_chapters,
+        "description": yt_prepared_description,
+        "final_description": yt_final_description,
+    }
+
+
+def log_render_metadata(title, description):
+    print("\n=== YOUTUBE TITLE ===")
+    print(title)
+    print("\n=== YOUTUBE DESCRIPTION ===")
+    print(description)
+    print("\n=== END YOUTUBE METADATA ===\n")
 
 def main():
     audio_file, image_file = prompt_user()
@@ -178,8 +299,48 @@ def main():
         print(f"✂️  Clipping homily (from {start}s to {end}s) → {homily_file}")
         clip_audio_segment(audio_file, start, end, homily_file)
 
+    # Persist a canonical homily-only payload for downstream steps (especially MDX).
+    # This prevents later stages from accidentally re-parsing the full transcript.
+    homily_json_path = os.path.join(working_dir, "homily.json")
+    homily_segments_for_mdx = []
+    for seg in segments or []:
+        if isinstance(seg, dict):
+            homily_segments_for_mdx.append({
+                "start": float(seg.get("start", 0.0)),
+                "end": float(seg.get("end", 0.0)),
+                "text": str(seg.get("text", "")).strip(),
+            })
+        elif isinstance(seg, (list, tuple)) and len(seg) >= 3:
+            homily_segments_for_mdx.append({
+                "start": float(seg[0]),
+                "end": float(seg[1]),
+                "text": str(seg[2]).strip(),
+            })
+
+    with open(homily_json_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "homily_text": (text or "").strip(),
+                "homily_segments": homily_segments_for_mdx,
+            },
+            f,
+            indent=2,
+        )
+    print(f"✅ Homily-only JSON saved: {homily_json_path}")
+
     # -------------------------------
-    # 3. Generate Video Script JSON
+    # 3. Generate MDX / Metadata Early
+    # -------------------------------
+    temp_mdx_path, final_mdx_path, post = generate_mdx_artifacts(
+        homily_json_path=homily_json_path,
+        working_dir=working_dir,
+        final_output_dir=final_output_dir,
+    )
+    metadata = post.metadata
+    youtube_payload = build_youtube_payload(metadata)
+
+    # -------------------------------
+    # 4. Generate Video Script JSON
     # -------------------------------
     video_script_path = os.path.join(working_dir, "video_script.json")
     if os.path.exists(video_script_path):
@@ -192,7 +353,7 @@ def main():
         print("Video script saved.")
 
     # -------------------------------
-    # 4. Clean Audio
+    # 5. Clean Audio
     # -------------------------------
     homily_file_clean = os.path.join(working_dir, "homily_clean.mp3")
     if os.path.exists(homily_file_clean):
@@ -222,12 +383,13 @@ def main():
         print(f"Final homily audio saved as {homily_file_final}")
 
     # -------------------------------
-    # 5. Generate Video
+    # 6. Generate Video
     # -------------------------------
     final_video_path = os.path.join(final_output_dir, f"{image_base}.mp4")
     if os.path.exists(final_video_path):
         print("Final video already exists; skipping generation.")
     else:
+        log_render_metadata(metadata["title"], youtube_payload["final_description"])
         video_with_text_path = os.path.join(working_dir, f"{image_base}.mp4")
         if not os.path.exists(video_with_text_path):
             print("Generating video-with-text...")
@@ -249,7 +411,7 @@ def main():
         print(f"Final video saved as {final_video_path}")
 
     # -------------------------------
-    # 6. Generate Captions
+    # 7. Generate Captions
     # -------------------------------
     srt_file = os.path.join(working_dir, "video_captions.srt")
     if os.path.exists(srt_file):
@@ -260,67 +422,9 @@ def main():
 
 
     # -------------------------------
-    # 7. Generate MDX
-    # -------------------------------
-    temp_mdx_path = os.path.join(working_dir, "homily_temp.mdx")
-
-    print("Generating MDX file...")
-    mdx_generator_script = os.path.abspath('./mdx_generator.py')
-    result = subprocess.run(
-        ["python", mdx_generator_script, transcription_json_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-
-    if result.returncode != 0:
-        print(result.stderr)
-        raise RuntimeError(f"mdx_generator.py failed with return code {result.returncode}")
-
-    lines_to_ignore = ("Found phrase", "The main part", "Phrase not found", "Homily text:")
-    cleaned_output = []
-    capture = False
-    for line in result.stdout.splitlines():
-        if not capture and line.strip().startswith('---'):
-            capture = True
-        if capture and not line.startswith(lines_to_ignore):
-            cleaned_output.append(line)
-
-    mdx_text = "\n".join(cleaned_output).strip()
-    if not mdx_text:
-        raise RuntimeError("MDX generation failed: empty output")
-
-    # Write temp (atomic-ish), then decide final path from front-matter
-    with open(temp_mdx_path, "w", encoding="utf-8") as mdx_file:
-        mdx_file.write(mdx_text)
-
-    front = parse_front_matter_block(mdx_text)
-    final_mdx_path = resolve_final_mdx_path_from_front(front, final_output_dir)
-
-    if os.path.exists(final_mdx_path):
-        print(f"Final MDX already exists at: {final_mdx_path}; skipping write.")
-    else:
-        # atomic move to final path directory
-        with tempfile.NamedTemporaryFile("w", delete=False, dir=os.path.dirname(final_mdx_path), suffix=".mdx", encoding="utf-8") as tf:
-            tf.write(mdx_text)
-            tmp_final = tf.name
-        os.replace(tmp_final, final_mdx_path)
-
-    print(f"✅ Clean MDX file generated at: {final_mdx_path}")
-
-
-    # -------------------------------
     # 8. Load Metadata
     # -------------------------------
-    post = frontmatter.load(final_mdx_path)
-    metadata = post.metadata
-    print("Metadata:", metadata)
-
-    required_fields = ["title", "youtube_description", "keywords"]
-    missing_fields = [field for field in required_fields if not metadata.get(field)]
-    if missing_fields:
-        raise ValueError(f"Missing required MDX metadata fields: {', '.join(missing_fields)}")
-
+    # Metadata was already loaded before rendering so title/description were available.
 
     # -------------------------------
     # 9. Upload to YouTube
@@ -329,24 +433,21 @@ def main():
     try:
         tokens = get_and_refresh_google_user_tokens(google_user_id)
 
-        # Pull Education settings from MDX if present
-        yt_category = metadata.get("youtube_category_id", "27")  # default to Education
-        yt_edu_type = metadata.get("youtube_edu_type")
-        yt_edu_problems = metadata.get("youtube_edu_problems")  # expect list if present
-
         # Upload video. The helper handles:
         # - thumbnail search (ANY image in final folder)
-        # - privacy (public if thumbnail exists else private)
+        # - privacy (public if thumbnail exists else private draft)
         # - thumbnail set if found
         video_id = youtube_upload_video_with_optional_thumbnail(
             tokens=tokens,
             file_path=final_video_path,
             title=metadata["title"],
-            description=metadata["youtube_description"],
-            tags=[t.strip() for t in metadata["keywords"].split(",") if t.strip()],
-            categoryId=str(yt_category),
-            edu_type=yt_edu_type,
-            edu_problems=yt_edu_problems,
+            description=youtube_payload["description"],
+            tags=youtube_payload["tags"],
+            categoryId=youtube_payload["category"],
+            edu_type=youtube_payload["edu_type"],
+            edu_problems=youtube_payload["edu_problems"],
+            chapters=youtube_payload["chapters"],
+            chapter_offset_sec=11.0,
         )
 
         if not video_id:
@@ -358,7 +459,7 @@ def main():
         update_result = youtube_update_video(
             tokens=tokens,
             video_id=video_id,
-            new_description=metadata["youtube_description"],
+            new_description=youtube_payload["final_description"],
             new_title=metadata["title"],
             new_thumbnail_path=None
         )
@@ -369,6 +470,9 @@ def main():
 
         # Save YouTube ID back into MDX
         post.metadata["media_path"] = video_id
+        # Ensure metadata always has a concrete website endpoint path.
+        if not post.metadata.get("mdx_file"):
+            post.metadata["mdx_file"] = resolve_website_mdx_relpath(post.metadata)
         final_mdx_content = frontmatter.dumps(post)
         with open(final_mdx_path, "w", encoding="utf-8") as f:
             f.write(final_mdx_content)
@@ -381,21 +485,19 @@ def main():
         # Push to website repo (optional)
         website_repo = os.getenv("WEBSITE_REPO_PATH")
         if website_repo:
-            dest_rel = post.metadata.get("mdx_file")
-            if dest_rel:
-                dest_path = os.path.join(website_repo, dest_rel)
-                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                with open(dest_path, "w", encoding="utf-8") as f:
-                    f.write(final_mdx_content)
-                try:
-                    subprocess.run(["git", "-C", website_repo, "add", dest_rel], check=True)
-                    subprocess.run(["git", "-C", website_repo, "commit", "-m", f"Add {post.metadata['title']}"], check=True)
-                    subprocess.run(["git", "-C", website_repo, "push"], check=True)
-                    print("✅ Website content pushed successfully.")
-                except subprocess.CalledProcessError as e:
-                    print("⚠️ Warning: failed to push website content:", e)
-            else:
-                print("⚠️ mdx_file not specified in metadata; skipping website push.")
+            dest_rel = resolve_website_mdx_relpath(post.metadata)
+            dest_path = os.path.join(website_repo, dest_rel)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, "w", encoding="utf-8") as f:
+                f.write(final_mdx_content)
+            print(f"✅ MDX copied to website endpoint: {dest_path}")
+            try:
+                subprocess.run(["git", "-C", website_repo, "add", dest_rel], check=True)
+                subprocess.run(["git", "-C", website_repo, "commit", "-m", f"Add {post.metadata['title']}"], check=True)
+                subprocess.run(["git", "-C", website_repo, "push"], check=True)
+                print("✅ Website content pushed successfully.")
+            except subprocess.CalledProcessError as e:
+                print("⚠️ Warning: failed to push website content:", e)
         else:
             print("ℹ️ WEBSITE_REPO_PATH not set; skipping website push.")
 
