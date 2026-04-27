@@ -238,6 +238,369 @@ def _yaml_block_scalar(key: str, value: str, indent: int = 0) -> List[str]:
     return out
 
 
+def _slugify(s: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+    return slug or "section"
+
+
+def _format_time(seconds: Any) -> str:
+    try:
+        s = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        s = 0
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    if h:
+        return f"{h:d}:{m:02d}:{sec:02d}"
+    return f"{m:02d}:{sec:02d}"
+
+
+def _duration_from_segments(segments: List[Dict[str, Any]], homily_text: str) -> float:
+    if segments:
+        return max(float(s.get("end", 0.0) or 0.0) for s in segments)
+
+    # Conservative spoken-word estimate for prompt guidance only.
+    word_count = len(re.findall(r"\S+", homily_text or ""))
+    return (word_count / 135.0) * 60.0 if word_count else 0.0
+
+
+def _chapter_guidance(duration: float) -> str:
+    if duration <= 0:
+        return (
+            "Use enough chapters to guide the listener through the argument. "
+            "Prefer fewer strong, specific chapters over many generic labels."
+        )
+
+    minutes = duration / 60.0
+    target = max(3, min(14, round(minutes / 2.5)))
+    low = max(3, target - 2)
+    high = min(16, target + 3)
+    return (
+        f"The homily appears to be about {minutes:.1f} minutes. A strong YouTube chapter plan "
+        f"will usually land around {target} chapters, with {low}-{high} acceptable when the logic "
+        "of the sermon calls for it. Do not place chapters by clock interval; place them where "
+        "the preacher begins a new claim, image, example, doctrine, warning, exhortation, or conclusion."
+    )
+
+
+def _build_timed_transcript(segments: List[Dict[str, Any]], homily_text: str) -> str:
+    """
+    Give the model a transcript with timestamps it can actually reason over.
+    The blocks are only for readability/context; chapter choices should be semantic.
+    """
+    if not segments:
+        return "No timestamped segments were provided.\n\n" + (homily_text or "").strip()
+
+    blocks: List[str] = []
+    cur_text: List[str] = []
+    cur_start: Optional[float] = None
+    cur_end: float = 0.0
+    cur_chars = 0
+
+    def flush() -> None:
+        nonlocal cur_text, cur_start, cur_end, cur_chars
+        if cur_start is None or not cur_text:
+            return
+        idx = len(blocks) + 1
+        text = " ".join(t.strip() for t in cur_text if t.strip())
+        blocks.append(f"{idx:03d} [{_format_time(cur_start)}-{_format_time(cur_end)}] {text}")
+        cur_text = []
+        cur_start = None
+        cur_end = 0.0
+        cur_chars = 0
+
+    for seg in segments:
+        text = str(seg.get("text") or "").strip()
+        if not text:
+            continue
+
+        start = float(seg.get("start", 0.0) or 0.0)
+        end = float(seg.get("end", start) or start)
+        if cur_start is None:
+            cur_start = start
+
+        cur_text.append(text)
+        cur_end = end
+        cur_chars += len(text)
+
+        if cur_chars >= 700 and re.search(r"[.!?][\"')\]]?$", text):
+            flush()
+        elif cur_chars >= 1100:
+            flush()
+
+    flush()
+
+    transcript = "\n".join(blocks)
+    # Keep prompts within a practical size while preserving the beginning and end.
+    max_chars = 65000
+    if len(transcript) <= max_chars:
+        return transcript
+
+    head = transcript[: max_chars // 2]
+    tail = transcript[-max_chars // 2 :]
+    return head.rstrip() + "\n\n[...middle of transcript omitted for prompt length...]\n\n" + tail.lstrip()
+
+
+def _snap_to_segment_start(value: Any, segments: List[Dict[str, Any]], max_delta: float = 18.0) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        seconds = max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+    if not segments:
+        return seconds
+
+    starts = [float(s.get("start", 0.0) or 0.0) for s in segments]
+    nearest = min(starts, key=lambda x: abs(x - seconds))
+    if abs(nearest - seconds) <= max_delta:
+        return nearest
+    return seconds
+
+
+def _unique_anchor(title: str, used: set) -> str:
+    base = _slugify(title)
+    anchor = base
+    i = 2
+    while anchor in used:
+        anchor = f"{base}-{i}"
+        i += 1
+    used.add(anchor)
+    return anchor
+
+
+def _normalize_chapters(
+    chapters: List[Any],
+    segments: List[Dict[str, Any]],
+    duration: float,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen_titles = set()
+    used_anchors = set()
+
+    for ch in chapters or []:
+        if not isinstance(ch, dict):
+            continue
+        title = re.sub(r"\s+", " ", str(ch.get("title") or "").strip())
+        if not title:
+            continue
+        title_key = title.lower()
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+
+        start = _snap_to_segment_start(ch.get("start"), segments)
+        if start is not None and duration > 0:
+            start = max(0.0, min(float(start), duration))
+
+        anchor = str(ch.get("anchor") or "").strip() or title
+        out.append({
+            "title": title[:90],
+            "anchor": _unique_anchor(anchor, used_anchors),
+            "start": start,
+        })
+
+    out.sort(key=lambda x: float(x["start"]) if x["start"] is not None else 999999.0)
+
+    # The first homily chapter should identify the opening movement, not disappear.
+    if out and out[0]["start"] is not None and float(out[0]["start"]) > 20.0:
+        out[0]["start"] = 0.0
+
+    return out
+
+
+def _fallback_chapters_from_headings(
+    headings: List[Any],
+    toc: List[Any],
+    segments: List[Dict[str, Any]],
+    duration: float,
+) -> List[Dict[str, Any]]:
+    heading_dicts = [h for h in headings or [] if isinstance(h, dict)]
+    if heading_dicts:
+        return _normalize_chapters(
+            [
+                {
+                    "title": h.get("title"),
+                    "anchor": h.get("title"),
+                    "start": h.get("start"),
+                }
+                for h in heading_dicts
+            ],
+            segments,
+            duration,
+        )
+
+    titles = [str(t or "").strip() for t in toc or [] if str(t or "").strip()]
+    if not titles:
+        return []
+
+    if not segments:
+        starts = [None for _ in titles]
+    else:
+        step = max(1, len(segments) // max(1, len(titles)))
+        starts = [segments[min(i * step, len(segments) - 1)]["start"] for i in range(len(titles))]
+
+    return _normalize_chapters(
+        [{"title": title, "anchor": title, "start": start} for title, start in zip(titles, starts)],
+        segments,
+        duration,
+    )
+
+
+def _normalize_headings(
+    headings: List[Any],
+    chapters: List[Dict[str, Any]],
+    toc: List[Any],
+    segments: List[Dict[str, Any]],
+    para_count: int,
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    used = set()
+
+    for ch in chapters or []:
+        title = re.sub(r"\s+", " ", str(ch.get("title") or "").strip())
+        if not title:
+            continue
+        start = _snap_to_segment_start(ch.get("start"), segments)
+        key = (round(float(start or 0.0), 1), title.lower())
+        if key in used:
+            continue
+        used.add(key)
+        normalized.append({
+            "title": title[:90],
+            "level": "h2",
+            "start": start,
+            "para_index": None,
+        })
+
+    for h in headings or []:
+        if not isinstance(h, dict):
+            continue
+        title = re.sub(r"\s+", " ", str(h.get("title") or "").strip())
+        if not title:
+            continue
+        lvl = str(h.get("level") or "h2").lower()
+        if lvl not in ("h2", "h3"):
+            lvl = "h2"
+
+        start = _snap_to_segment_start(h.get("start"), segments)
+        para_index = None
+        if start is None:
+            try:
+                para_index = int(h.get("para_index", 0))
+            except (TypeError, ValueError):
+                para_index = 0
+            para_index = max(0, min(para_index, max(0, para_count - 1)))
+
+        key = (
+            round(float(start or 0.0), 1) if start is not None else None,
+            title.lower(),
+        )
+        if key in used:
+            continue
+        if lvl == "h2" and any(title.lower() == ch.get("title", "").lower() for ch in chapters):
+            continue
+        used.add(key)
+
+        normalized.append({
+            "title": title[:90],
+            "level": lvl,
+            "start": start,
+            "para_index": para_index,
+        })
+
+    if not normalized and toc:
+        for i, t in enumerate(toc):
+            title = str(t or "").strip()
+            if not title:
+                continue
+            normalized.append({
+                "title": title,
+                "level": "h2",
+                "start": None,
+                "para_index": min(i, max(0, para_count - 1)),
+            })
+
+    normalized.sort(
+        key=lambda h: (
+            float(h["start"]) if h.get("start") is not None else 999999.0,
+            int(h["para_index"]) if h.get("para_index") is not None else 999999,
+        )
+    )
+    return normalized
+
+
+def _paragraphize_segment_texts(segment_texts: List[str]) -> List[str]:
+    paragraphs: List[str] = []
+    cur: List[str] = []
+    cur_chars = 0
+
+    for text in segment_texts:
+        text = str(text or "").strip()
+        if not text:
+            continue
+        cur.append(text)
+        cur_chars += len(text)
+        if cur_chars >= 650 and re.search(r"[.!?][\"')\]]?$", text):
+            paragraphs.append(" ".join(cur).strip())
+            cur = []
+            cur_chars = 0
+        elif cur_chars >= 1050:
+            paragraphs.append(" ".join(cur).strip())
+            cur = []
+            cur_chars = 0
+
+    if cur:
+        paragraphs.append(" ".join(cur).strip())
+    return paragraphs
+
+
+def _render_body_from_segments(
+    segments: List[Dict[str, Any]],
+    headings: List[Dict[str, Any]],
+) -> Tuple[List[str], List[str]]:
+    starts = [float(s.get("start", 0.0) or 0.0) for s in segments]
+    boundaries: List[Tuple[int, Dict[str, Any]]] = []
+    seen_idx = set()
+
+    for h in headings:
+        if h.get("start") is None:
+            continue
+        start = float(h["start"])
+        idx = min(range(len(starts)), key=lambda i: abs(starts[i] - start))
+        if idx in seen_idx:
+            continue
+        seen_idx.add(idx)
+        boundaries.append((idx, h))
+
+    boundaries.sort(key=lambda x: x[0])
+
+    if not boundaries or boundaries[0][0] != 0:
+        first_heading = next((h for h in headings if h.get("level") == "h2"), None)
+        intro_title = first_heading["title"] if first_heading else "Opening the Homily"
+        boundaries.insert(0, (0, {"title": intro_title, "level": "h2"}))
+
+    out: List[str] = []
+    rendered_titles: List[str] = []
+
+    for pos, (idx, heading) in enumerate(boundaries):
+        next_idx = boundaries[pos + 1][0] if pos + 1 < len(boundaries) else len(segments)
+        if next_idx <= idx:
+            continue
+
+        tag = "##" if heading.get("level") == "h2" else "###"
+        title = str(heading.get("title") or "").strip()
+        if title:
+            out.append(f"{tag} {title}")
+            rendered_titles.append(title)
+
+        section_texts = [str(s.get("text") or "").strip() for s in segments[idx:next_idx]]
+        out.extend(_paragraphize_segment_texts(section_texts))
+
+    return out, rendered_titles
+
+
 # ---------------------------
 # Core generator
 # ---------------------------
@@ -258,14 +621,9 @@ def mdx_generator(homily_text: str, segments: Optional[List[Dict[str, Any]]] = N
 
     normalized_segments = _normalize_segments(segments)
 
-    _compact = []
-    for s in normalized_segments:
-        _compact.append({
-            "start": float(s["start"]),
-            "end": float(s["end"]),
-            "text": (s["text"] or "")[:120],
-        })
-    segments_json = json.dumps(_compact[:2000], ensure_ascii=False)
+    duration = _duration_from_segments(normalized_segments, homily_text)
+    chapter_guidance = _chapter_guidance(duration)
+    timed_transcript = _build_timed_transcript(normalized_segments, homily_text)
 
     prompt = f"""
 You are an MDX formatter for a Traditional Catholic homily. DO NOT return the homily body.
@@ -297,8 +655,8 @@ Output ONLY a single JSON object with these keys:
   }},
   "toc": ["<H2 or H3 title>", "<H2/H3>", "..."],
   "headings": [
-    {{ "para_index": 0, "level": "h2", "title": "<title>" }},
-    {{ "para_index": 3, "level": "h3", "title": "<title>" }}
+    {{ "start": 0.0, "level": "h2", "title": "<chapter-style heading>" }},
+    {{ "start": 183.4, "level": "h3", "title": "<optional supporting heading>" }}
   ],
   "summary_paragraphs": ["<para 1>", "<para 2>", "<para 3 (optional)>"],
   "shorts": [
@@ -344,22 +702,38 @@ KEYWORDS:
 - Front matter keywords must include: "Latin Mass", "Tridentine Mass", "Traditional Catholic" + other relevant terms.
 
 HEADINGS & TOC:
-- Paragraph indices come from splitting HOMILY_TEXT on blank lines.
+- Before writing JSON, silently map the homily's argument: opening claim, scripture/doctrine, examples, applications, warnings, and final exhortation.
+- Think like a careful Catholic editor creating reader wayfinding and YouTube chapters.
+- Headings must describe what the NEXT section is about, not summarize the previous section.
+- Prefer concrete, specific titles tied to the sermon: doctrine, image, Gospel scene, warning, virtue, sin, grace, or exhortation.
+- Avoid generic labels such as "Introduction", "Faith and Hope", "The Gospel", "Conclusion", "Reflection", or "Final Thoughts" unless the title names the actual point.
+- Use Title Case, 3-8 words, no punctuation unless needed.
+- Bad headings: "The Gospel", "Faith and Love", "Conclusion".
+- Better headings: "The Pharisee Refuses Mercy", "Grace Begins With Contrition", "Carry the Cross Without Complaint".
+- h2 headings should be the main YouTube chapter movements. h3 headings are allowed only when a shorter subsection genuinely helps the reader.
+- Use start times from TIMED_TRANSCRIPT. The first h2/chapter should begin at 0.0.
+- The toc should match the visible heading titles in order.
+- {chapter_guidance}
 
 SHORTS/CHAPTERS:
-- If SEGMENTS_JSON is provided, align timing; else set null.
+- Chapters are for YouTube and must be excellent.
+- Every chapter title must be useful to someone deciding whether to keep watching.
+- Use the preacher's actual logic, not equal spacing. It is fine for two chapters to be close together if the homily turns sharply; it is also fine for a chapter to run longer if one idea is being developed.
+- Chapters should mirror the h2 headings and use the same start seconds.
+- If there are h3 headings, include them in headings but normally not in chapters.
+- If TIMED_TRANSCRIPT is unavailable, set chapter starts to null.
 
 HOMILY_TEXT (do NOT echo back):
 {homily_text}
 
-SEGMENTS_JSON:
-{segments_json}
+TIMED_TRANSCRIPT (use this for chapter timing and logical section starts):
+{timed_transcript}
 """
 
     response = openai.chat.completions.create(
         model="gpt-4o",
-        temperature=0.4,
-        max_completion_tokens=2048,
+        temperature=0.25,
+        max_completion_tokens=4096,
         response_format={"type": "json_object"},
         messages=[
             {
@@ -389,13 +763,15 @@ SEGMENTS_JSON:
 
     fm = payload.get("front_matter", {}) or {}
     toc = payload.get("toc", []) or []
-    headings = payload.get("headings", []) or []
+    raw_headings = payload.get("headings", []) or []
     summary_paras = payload.get("summary_paragraphs", []) or []
     shorts = payload.get("shorts", []) or []
-    chapters = payload.get("chapters", []) or []
+    raw_chapters = payload.get("chapters", []) or []
+    chapters = _normalize_chapters(raw_chapters, normalized_segments, duration)
+    if not chapters:
+        chapters = _fallback_chapters_from_headings(raw_headings, toc, normalized_segments, duration)
 
-    kebab = (fm.get("title") or "homily").strip().lower()
-    kebab = re.sub(r"[^a-z0-9]+", "-", kebab).strip("-")
+    kebab = _slugify(fm.get("title") or "homily")
 
     fm_defaults = {
         "title": fm.get("title") or "Untitled Homily",
@@ -499,52 +875,45 @@ SEGMENTS_JSON:
     if not paras:
         paras = [""]
 
-    normalized_headings: List[Dict[str, Any]] = []
-    for h in headings or []:
-        title = str(h.get("title") or "").strip()
-        if not title:
-            continue
-        try:
-            idx = int(h.get("para_index", 0))
-        except (TypeError, ValueError):
-            idx = 0
-        lvl = str(h.get("level") or "h2").lower()
-        if lvl not in ("h2", "h3"):
-            lvl = "h2"
-        normalized_headings.append({"title": title, "level": lvl, "para_index": idx})
+    normalized_headings = _normalize_headings(
+        raw_headings,
+        chapters,
+        toc,
+        normalized_segments,
+        len(paras),
+    )
 
-    # Fallback: if the model returns TOC but no usable headings, build headings from TOC.
-    if not normalized_headings and toc:
-        for i, t in enumerate(toc):
-            title = str(t or "").strip()
-            if not title:
-                continue
-            normalized_headings.append({
-                "title": title,
-                "level": "h2",
-                "para_index": min(i, len(paras) - 1),
-            })
+    if normalized_segments:
+        out_paras, rendered_heading_titles = _render_body_from_segments(
+            normalized_segments,
+            normalized_headings,
+        )
+    else:
+        ins_map: Dict[int, List[str]] = {}
+        rendered_heading_titles: List[str] = []
+        for h in normalized_headings:
+            idx = max(0, min(int(h.get("para_index") or 0), len(paras) - 1))
+            tag = "##" if h["level"] == "h2" else "###"
+            ins_map.setdefault(idx, []).append(f"{tag} {h['title']}")
+            rendered_heading_titles.append(h["title"])
 
-    ins_map: Dict[int, List[str]] = {}
-    rendered_heading_titles: List[str] = []
-    for h in normalized_headings:
-        idx = max(0, min(int(h["para_index"]), len(paras) - 1))
-        tag = "##" if h["level"] == "h2" else "###"
-        ins_map.setdefault(idx, []).append(f"{tag} {h['title']}")
-        rendered_heading_titles.append(h["title"])
+        out_paras = []
+        for i, p in enumerate(paras):
+            if i in ins_map:
+                for hdr in ins_map[i]:
+                    out_paras.append(hdr)
+            out_paras.append(p)
 
-    out_paras: List[str] = []
-    for i, p in enumerate(paras):
-        if i in ins_map:
-            for hdr in ins_map[i]:
-                out_paras.append(hdr)
-        out_paras.append(p)
-
-    toc_source = [str(t).strip() for t in (toc or rendered_heading_titles) if str(t).strip()]
+    chapter_titles = [ch["title"] for ch in chapters if ch.get("title")]
+    toc_source = [
+        str(t).strip()
+        for t in (rendered_heading_titles or chapter_titles or toc)
+        if str(t).strip()
+    ]
     if toc_source:
         body_lines.append("## Summary of Headings\n")
         for t in toc_source:
-            anchor = re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")
+            anchor = _slugify(t)
             body_lines.append(f"- [{t}](#{anchor})")
         body_lines.append("")
 
