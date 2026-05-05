@@ -22,6 +22,7 @@ from youtube import (
 )
 from googleapiclient.errors import HttpError
 from txt_to_json import txt_to_json
+from transcript_editor import generate_transcript_editor
 import re
 import tempfile
 import shutil
@@ -199,6 +200,60 @@ def log_render_metadata(title, description):
     print(description)
     print("\n=== END YOUTUBE METADATA ===\n")
 
+
+def write_homily_json_from_video_script(video_script_path, homily_json_path):
+    with open(video_script_path, "r", encoding="utf-8") as f:
+        video_script = json.load(f)
+
+    homily_segments = []
+    for seg in video_script.get("segments", []) or []:
+        homily_segments.append({
+            "start": float(seg.get("start", 0.0)),
+            "end": float(seg.get("end", 0.0)),
+            "text": str(seg.get("text", "") or "").strip(),
+        })
+
+    homily_text = str(video_script.get("homily_text") or "").strip()
+    if not homily_text:
+        homily_text = " ".join(seg["text"] for seg in homily_segments).strip()
+
+    with open(homily_json_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "homily_text": homily_text,
+                "homily_segments": homily_segments,
+            },
+            f,
+            indent=2,
+        )
+
+    video_segments = [(seg["start"], seg["end"], seg["text"]) for seg in homily_segments]
+    return video_script, homily_text, video_segments
+
+
+def prompt_for_transcript_review(video_script_path, audio_path=None):
+    answer = input("Review/correct transcript before making the video? [y/N]: ").strip().lower()
+    if answer not in {"y", "yes"}:
+        return False
+
+    editor_path = generate_transcript_editor(video_script_path, audio_path=audio_path)
+    editor_url = f"file://{editor_path}"
+    print(f"\n✅ Transcript editor generated: {editor_path}")
+    print(f"   Save corrections over this file: {video_script_path}")
+    print("   After saving, rerun this workflow and answer 'N' to continue video generation.\n")
+
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["open", editor_path], check=False)
+        else:
+            import webbrowser
+            webbrowser.open(editor_url)
+    except Exception as e:
+        print(f"⚠️ Could not open editor automatically: {e}")
+        print(f"Open this file manually: {editor_url}")
+
+    return True
+
 def main():
     audio_file, image_file = prompt_user()
     dir = os.path.dirname(audio_file)
@@ -299,48 +354,8 @@ def main():
         print(f"✂️  Clipping homily (from {start}s to {end}s) → {homily_file}")
         clip_audio_segment(audio_file, start, end, homily_file)
 
-    # Persist a canonical homily-only payload for downstream steps (especially MDX).
-    # This prevents later stages from accidentally re-parsing the full transcript.
-    homily_json_path = os.path.join(working_dir, "homily.json")
-    homily_segments_for_mdx = []
-    for seg in segments or []:
-        if isinstance(seg, dict):
-            homily_segments_for_mdx.append({
-                "start": float(seg.get("start", 0.0)),
-                "end": float(seg.get("end", 0.0)),
-                "text": str(seg.get("text", "")).strip(),
-            })
-        elif isinstance(seg, (list, tuple)) and len(seg) >= 3:
-            homily_segments_for_mdx.append({
-                "start": float(seg[0]),
-                "end": float(seg[1]),
-                "text": str(seg[2]).strip(),
-            })
-
-    with open(homily_json_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "homily_text": (text or "").strip(),
-                "homily_segments": homily_segments_for_mdx,
-            },
-            f,
-            indent=2,
-        )
-    print(f"✅ Homily-only JSON saved: {homily_json_path}")
-
     # -------------------------------
-    # 3. Generate MDX / Metadata Early
-    # -------------------------------
-    temp_mdx_path, final_mdx_path, post = generate_mdx_artifacts(
-        homily_json_path=homily_json_path,
-        working_dir=working_dir,
-        final_output_dir=final_output_dir,
-    )
-    metadata = post.metadata
-    youtube_payload = build_youtube_payload(metadata)
-
-    # -------------------------------
-    # 4. Generate Video Script JSON
+    # 3. Generate / Review Video Script JSON
     # -------------------------------
     video_script_path = os.path.join(working_dir, "video_script.json")
     if os.path.exists(video_script_path):
@@ -351,6 +366,26 @@ def main():
         with open(video_script_path, "w", encoding="utf-8") as f:
             json.dump(video_script, f, indent=4)
         print("Video script saved.")
+
+    if prompt_for_transcript_review(video_script_path, audio_path=homily_file):
+        return
+
+    # Persist a canonical homily-only payload from the corrected video script.
+    # This keeps MDX, captions, and burned-in video text in sync.
+    homily_json_path = os.path.join(working_dir, "homily.json")
+    video_script, text, segments = write_homily_json_from_video_script(video_script_path, homily_json_path)
+    print(f"✅ Homily-only JSON saved from video script: {homily_json_path}")
+
+    # -------------------------------
+    # 4. Generate MDX / Metadata
+    # -------------------------------
+    temp_mdx_path, final_mdx_path, post = generate_mdx_artifacts(
+        homily_json_path=homily_json_path,
+        working_dir=working_dir,
+        final_output_dir=final_output_dir,
+    )
+    metadata = post.metadata
+    youtube_payload = build_youtube_payload(metadata)
 
     # -------------------------------
     # 5. Clean Audio
