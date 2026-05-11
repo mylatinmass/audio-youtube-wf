@@ -4,11 +4,11 @@ from audio_clip import clip_audio_segment
 from auphonic_audio_cleaner import start_production, download_file
 from video_generator import create_text_video
 from video_script import generate_video_script
+from thumbnail_generator import ensure_youtube_thumbnail
 import os
 import sys
 import json
 import subprocess
-from PIL import Image  # kept, though we no longer use it for thumbnails
 import frontmatter
 from dotenv import load_dotenv
 from get_token import get_and_refresh_google_user_tokens, SCOPES
@@ -105,8 +105,45 @@ def clean_path(path):
     return path.strip().strip('"').strip("'")
 
 
+def find_existing_final_mdx(final_output_dir):
+    matches = []
+    for root, _, files in os.walk(final_output_dir):
+        for filename in files:
+            if filename.lower().endswith(".mdx"):
+                matches.append(os.path.join(root, filename))
+
+    if not matches:
+        return None
+
+    matches.sort(
+        key=lambda path: (
+            0 if f"{os.sep}src{os.sep}mds{os.sep}" in path else 1,
+            -os.path.getmtime(path),
+            path,
+        )
+    )
+    if len(matches) > 1:
+        print(f"⚠️ Multiple final MDX files found; using: {matches[0]}")
+
+    return matches[0]
+
+
 def generate_mdx_artifacts(homily_json_path, working_dir, final_output_dir):
     temp_mdx_path = os.path.join(working_dir, "homily_temp.mdx")
+    existing_mdx_path = find_existing_final_mdx(final_output_dir)
+
+    if existing_mdx_path:
+        print(f"Final MDX already exists; skipping MDX generation: {existing_mdx_path}")
+        post = frontmatter.load(existing_mdx_path)
+        metadata = post.metadata
+        print("Metadata:", metadata)
+
+        required_fields = ["title", "youtube_description", "keywords"]
+        missing_fields = [field for field in required_fields if not metadata.get(field)]
+        if missing_fields:
+            raise ValueError(f"Missing required MDX metadata fields: {', '.join(missing_fields)}")
+
+        return temp_mdx_path, existing_mdx_path, post
 
     print("Generating MDX file...")
     mdx_generator_script = os.path.abspath("./mdx_generator.py")
@@ -191,6 +228,67 @@ def build_youtube_payload(metadata):
         "description": yt_prepared_description,
         "final_description": yt_final_description,
     }
+
+
+def sync_mdx_to_website(post, final_mdx_content):
+    website_repo = os.path.expanduser(str(os.getenv("WEBSITE_REPO_PATH") or "").strip())
+    if not website_repo:
+        raise RuntimeError("WEBSITE_REPO_PATH is not set; cannot add MDX to website.")
+    if not os.path.isdir(website_repo):
+        raise RuntimeError(f"WEBSITE_REPO_PATH does not exist: {website_repo}")
+
+    dest_rel = resolve_website_mdx_relpath(post.metadata)
+    dest_path = os.path.abspath(os.path.join(website_repo, dest_rel))
+    website_root = os.path.abspath(website_repo)
+    if not dest_path.startswith(website_root + os.sep):
+        raise RuntimeError(f"Refusing to write MDX outside website repo: {dest_path}")
+
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        delete=False,
+        dir=os.path.dirname(dest_path),
+        suffix=".mdx",
+        encoding="utf-8",
+    ) as tf:
+        tf.write(final_mdx_content)
+        tmp_dest = tf.name
+    os.replace(tmp_dest, dest_path)
+
+    with open(dest_path, "r", encoding="utf-8") as f:
+        copied_content = f.read()
+    if copied_content != final_mdx_content:
+        raise RuntimeError(f"Website MDX verification failed: {dest_path}")
+
+    print(f"✅ MDX copied to website endpoint: {dest_path}")
+
+    status = subprocess.run(
+        ["git", "-C", website_repo, "status", "--porcelain", "--", dest_rel],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if not status.stdout.strip():
+        print("✅ Website MDX already matches repo; no website commit needed.")
+        return dest_path
+
+    subprocess.run(["git", "-C", website_repo, "add", dest_rel], check=True)
+    staged = subprocess.run(
+        ["git", "-C", website_repo, "diff", "--cached", "--quiet", "--", dest_rel],
+        check=False,
+    )
+    if staged.returncode == 0:
+        print("✅ Website MDX already staged/no commit needed.")
+        return dest_path
+
+    subprocess.run(
+        ["git", "-C", website_repo, "commit", "-m", f"Add {post.metadata['title']}"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", website_repo, "push"], check=True)
+    print("✅ Website content committed and pushed successfully.")
+    return dest_path
 
 
 def log_render_metadata(title, description):
@@ -457,9 +555,9 @@ def main():
 
 
     # -------------------------------
-    # 8. Load Metadata
+    # 8. Generate Thumbnail
     # -------------------------------
-    # Metadata was already loaded before rendering so title/description were available.
+    ensure_youtube_thumbnail(metadata, final_output_dir)
 
     # -------------------------------
     # 9. Upload to YouTube
@@ -513,31 +611,16 @@ def main():
             f.write(final_mdx_content)
         print(f"✅ Final MDX file updated with YouTube ID at: {final_mdx_path}")
 
+        # Critical: the website copy must succeed before this workflow is considered done.
+        sync_mdx_to_website(post, final_mdx_content)
+
         # Clean up temp
         if os.path.exists(temp_mdx_path):
             os.remove(temp_mdx_path)
 
-        # Push to website repo (optional)
-        website_repo = os.getenv("WEBSITE_REPO_PATH")
-        if website_repo:
-            dest_rel = resolve_website_mdx_relpath(post.metadata)
-            dest_path = os.path.join(website_repo, dest_rel)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "w", encoding="utf-8") as f:
-                f.write(final_mdx_content)
-            print(f"✅ MDX copied to website endpoint: {dest_path}")
-            try:
-                subprocess.run(["git", "-C", website_repo, "add", dest_rel], check=True)
-                subprocess.run(["git", "-C", website_repo, "commit", "-m", f"Add {post.metadata['title']}"], check=True)
-                subprocess.run(["git", "-C", website_repo, "push"], check=True)
-                print("✅ Website content pushed successfully.")
-            except subprocess.CalledProcessError as e:
-                print("⚠️ Warning: failed to push website content:", e)
-        else:
-            print("ℹ️ WEBSITE_REPO_PATH not set; skipping website push.")
-
     except Exception as e:
         print("Error:", e)
+        raise
 
 if __name__ == "__main__":
     main()

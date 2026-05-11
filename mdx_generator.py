@@ -637,6 +637,7 @@ Output ONLY a single JSON object with these keys:
     "youtube_category": "Education",
     "youtube_description": "<EXACTLY three paragraphs beginning with the donation preface as provided below>",
     "youtube_hash": "<comma-separated>",
+    "thumbnail_idea": "<short visual subject phrase for the YouTube thumbnail>",
     "mdx_file": "src/mds/lectures/<kebab>.mdx",
     "category": "lectures",
     "slug": "/<kebab>",
@@ -680,6 +681,8 @@ Output ONLY a single JSON object with these keys:
 STRICT RULES:
 - Use ONLY the HOMILY_TEXT for headings/TOC/summaries/quotes/shorts/chapters. Do NOT invent lines.
 - Do NOT echo or return the homily body anywhere in the JSON.
+- thumbnail_idea should be a concise phrase naming the central sermon subject for an image prompt.
+- Do not include style instructions in thumbnail_idea.
 
 YOUTUBE DESCRIPTION (IMPORTANT FORMATTING):
 - youtube_description MUST preserve paragraph breaks using blank lines.
@@ -780,6 +783,7 @@ TIMED_TRANSCRIPT (use this for chapter timing and logical section starts):
         "youtube_category": fm.get("youtube_category") or "Education",
         "youtube_description": fm.get("youtube_description") or "",
         "youtube_hash": fm.get("youtube_hash") or "",
+        "thumbnail_idea": fm.get("thumbnail_idea") or fm.get("title") or "Traditional Catholic homily",
         "mdx_file": fm.get("mdx_file") or f"src/mds/lectures/{kebab}.mdx",
         "category": fm.get("category") or "lectures",
         "slug": fm.get("slug") or f"/{kebab}",
@@ -815,6 +819,7 @@ TIMED_TRANSCRIPT (use this for chapter timing and logical section starts):
         "keywords",
         "youtube_category",
         "youtube_hash",
+        "thumbnail_idea",
         "mdx_file",
         "category",
         "slug",

@@ -1,6 +1,7 @@
 import os
 import psycopg2
 from datetime import datetime, timezone
+from thumbnail_generator import MAX_THUMBNAIL_BYTES, is_valid_youtube_thumbnail
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -135,19 +136,27 @@ def finalize_youtube_description(
 
 def find_thumbnail_in_final_folder(final_video_path):
     """
-    Find ANY image in the same folder as the final video.
-    Accepts jpg, jpeg, png, webp.
-    Returns the first one found.
+    Find a valid YouTube thumbnail in the same folder as the final video.
+    Accepts only jpg/jpeg/png files under the thumbnail size limit.
     """
     folder = os.path.dirname(final_video_path)
     if not os.path.isdir(folder):
         return None
 
-    for filename in os.listdir(folder):
-        if filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-            return os.path.join(folder, filename)
+    candidates = []
+    for filename in sorted(os.listdir(folder)):
+        path = os.path.join(folder, filename)
+        if is_valid_youtube_thumbnail(path, max_bytes=MAX_THUMBNAIL_BYTES):
+            candidates.append(path)
 
-    return None
+    candidates.sort(
+        key=lambda path: (
+            0 if os.path.basename(path).lower().startswith("thumbnail") else 1,
+            os.path.basename(path).lower(),
+        )
+    )
+
+    return candidates[0] if candidates else None
 
 
 def build_youtube_service(tokens):
