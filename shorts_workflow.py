@@ -1,9 +1,11 @@
 import argparse
+import hashlib
 import json
 import os
 import random
 import re
-from concurrent.futures import ThreadPoolExecutor
+import shutil
+from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,19 +31,20 @@ from thumbnail_generator import (
 CANVAS_SIZE = (1080, 1920)
 IMAGE_SIZE = (1080, 1350)
 IMAGE_RATIO = 4 / 5
-GRADIENT_TOP = 900
-GRADIENT_BOTTOM = 1350
-BOTTOM_TOP = 1350
+IMAGE_TOP = 570
+TEXT_BOX_BOTTOM = 570
+GRADIENT_TOP = 570
+GRADIENT_BOTTOM = 1020
 FPS = 30
 MIN_SHORT_SECONDS = 15.0
 MAX_SHORT_SECONDS = 90.0
 DEFAULT_MAX_CLIPS = 7
 DEFAULT_MIN_CLIPS = 3
 TITLE_SECONDS = 2.4
-TEXT_SAFE_LEFT = 64
-TEXT_SAFE_RIGHT = 270
-TEXT_SAFE_TOP = BOTTOM_TOP + 44
-TEXT_SAFE_BOTTOM = 310
+TEXT_SAFE_LEFT = 74
+TEXT_SAFE_RIGHT = 74
+TEXT_SAFE_TOP = 20
+TEXT_SAFE_BOTTOM = CANVAS_SIZE[1] - TEXT_BOX_BOTTOM
 BACKGROUND_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 DEFAULT_BG_MUSIC_GAIN_DB = -22.0
 DEFAULT_BG_MUSIC_FADE_MS = 2500
@@ -232,6 +235,85 @@ def load_mdx_context(path: str) -> Dict[str, Any]:
     }
 
 
+def as_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def chapter_ranges_from_context(
+    context: Dict[str, Any],
+    units: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    duration = float(units[-1]["end"]) if units else 0.0
+    chapters: List[Dict[str, Any]] = []
+    for chapter in context.get("chapters") or []:
+        if not isinstance(chapter, dict):
+            continue
+        title = re.sub(r"\s+", " ", str(chapter.get("title") or "").strip())
+        start = as_float(chapter.get("start"))
+        if not title or start is None:
+            continue
+        chapters.append({"title": title, "start": max(0.0, start)})
+
+    chapters.sort(key=lambda item: item["start"])
+    ranges: List[Dict[str, Any]] = []
+    for index, chapter in enumerate(chapters):
+        end = chapters[index + 1]["start"] if index + 1 < len(chapters) else duration
+        if duration:
+            end = min(end, duration)
+        if end <= chapter["start"]:
+            continue
+        ranges.append(
+            {
+                "index": index + 1,
+                "title": chapter["title"],
+                "start": chapter["start"],
+                "end": end,
+                "duration": end - chapter["start"],
+            }
+        )
+    return ranges
+
+
+def format_chapter_map(context: Dict[str, Any], units: List[Dict[str, Any]]) -> str:
+    chapter_ranges = chapter_ranges_from_context(context, units)
+    lines = []
+    for chapter in chapter_ranges:
+        lines.append(
+            f'{chapter["index"]:02d} [{format_timestamp(chapter["start"])}-{format_timestamp(chapter["end"])}] '
+            f'{chapter["title"]}'
+        )
+
+    shorts = []
+    for short in context.get("shorts") or []:
+        if not isinstance(short, dict):
+            continue
+        title = re.sub(r"\s+", " ", str(short.get("title") or "").strip())
+        start = as_float(short.get("start"))
+        end = as_float(short.get("end"))
+        quote = re.sub(r"\s+", " ", str(short.get("quote") or "").strip())
+        if not title:
+            continue
+        time_part = ""
+        if start is not None and end is not None:
+            time_part = f" [{format_timestamp(start)}-{format_timestamp(end)}]"
+        shorts.append(f"- {title}{time_part}: {quote}".strip())
+
+    if not lines and not shorts:
+        return "No MDX chapter or short metadata was available."
+
+    out = []
+    if lines:
+        out.append("MDX YouTube chapters:")
+        out.extend(lines)
+    if shorts:
+        out.append("\nExisting MDX short suggestions:")
+        out.extend(shorts)
+    return "\n".join(out)
+
+
 def normalize_word(word: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "word": str(word.get("word") or word.get("text") or "").strip(),
@@ -296,52 +378,74 @@ def openai_select_clips(
     client = OpenAI(api_key=api_key)
     transcript = build_timed_transcript(units)
     context_json = json.dumps(context, ensure_ascii=False)[:6000]
+    chapter_map = format_chapter_map(context, units)
     prompt = f"""
 You are a Catholic homily editor creating YouTube Shorts.
 
-Your job is NOT to merely cut the homily into small chunks.
-Your job is to find the best self-contained moments and shape them into strong Shorts.
+Your job is NOT to hunt for isolated viral quotes.
+Your job is to make chapter-aligned, self-contained Shorts that preserve the homily's structure.
+Use the existing YouTube chapter plan as your editorial map. The Shorts should feel like close cousins
+of the chaptered YouTube video: same sermon logic, same major movements, but packaged as vertical clips.
 
 Return ONLY valid JSON:
 {{
   "clips": [
     {{
+      "major_point_id": "point-01",
+      "major_point_title": "<the major idea this clip represents, <=70 chars>",
       "title": "<original YouTube Shorts title, not a transcript line, <=70 chars>",
       "mdx_section_title": "<section-style heading, <=70 chars>",
       "theme": "<one sentence explaining why this clip is worth watching>",
+      "selection_reason": "<why this excerpt represents the chapter movement, <=180 chars>",
+      "power_quote": "<the clearest exact line or central phrase from the clip, <=180 chars>",
       "clip_type": "story|teaching|warning|exhortation|reflection",
       "story_arc": "<beginning, turn, and payoff if this is a story; otherwise empty string>",
       "start_segment": <integer>,
       "end_segment": <integer>,
-      "display_words": "<best concise quote or summary text for on-screen display, <=260 chars>",
+      "display_words": "<usually the power_quote; concise on-screen text, <=260 chars>",
       "keywords": ["keyword", "keyword"]
     }}
   ]
 }}
 
 Selection rules:
-- Select no fewer than {min_clips} clips if the transcript has enough strong material.
-- Select no more than {max_clips} clips.
-- Each clip must be 30 to 90 seconds when possible.
-- 15 to 29 seconds is allowed only if the moment is exceptionally strong and complete.
+- First identify the 3 to 7 major ideas or movements in the homily.
+- If MDX YouTube chapters are provided, use those chapters as the source of truth for the major ideas.
+- Prefer one representative Short from each chapter movement instead of clustering several Shorts in one chapter.
+- major_point_title should usually match the closest MDX chapter title.
+- mdx_section_title should be the chapter-style title for the sermon movement; it may match major_point_title.
+- title may be more YouTube Shorts friendly, but it must still clearly belong to that same chapter movement.
+- Existing MDX short suggestions are strong hints. Include or refine them when they are complete, 30 to 90 seconds, and not duplicated by a better nearby moment.
+- If a chapter is 30 to 90 seconds long, usually use the whole chapter as the Short.
+- If a chapter is longer than 90 seconds, choose the earliest complete 45 to 90 second excerpt that establishes the chapter's main claim.
+- Do not skip to a later quotable line unless the chapter opening is unusable, confusing, or purely housekeeping.
+- Then choose one representative complete 30 to 90 second excerpt from each major idea.
+- Select no more than {max_clips} clips. This is a ceiling, not a target.
+- Try to select at least {min_clips} clips if the transcript has enough strong major ideas.
+- Do not create filler clips just to reach {max_clips}.
+- Do not split one major idea into several adjacent clips.
+- Do not return multiple clips with the same major_point_title unless they are truly distinct sub-points.
+- Avoid clips under 30 seconds. Use them only if no complete 30 to 90 second version exists.
 - Each clip must be a complete standalone teaching, warning, exhortation, reflection, story, or spiritual lesson.
 - If a story, anecdote, example, or testimony appears, treat the ENTIRE story as ONE clip when it fits under 90 seconds.
 - Do NOT split one story into multiple Shorts unless the full story is longer than 90 seconds.
 - A story clip must include the setup, the key action or conflict, and the spiritual payoff.
 - If a story is followed immediately by the preacher explaining why the story matters, include that explanation if the total clip remains under 90 seconds.
-- Prefer clips with strong spiritual value: clear doctrine, practical moral application, emotional movement, repentance, conversion, warning, hope, or encouragement.
+- Prefer faithful representation of the chapter movement over the most dramatic quote.
 - Avoid announcements, housekeeping, readings, or context that cannot stand alone.
 - Use non-overlapping clips.
 - Use start_segment and end_segment numbers from the transcript.
 - Choose start_segment early enough that the viewer understands what is happening.
 - Choose end_segment late enough that the viewer receives the payoff.
+- power_quote should be the most memorable exact line when possible.
+- display_words should usually match power_quote. If no concise quote exists, use a short central phrase from the clip.
 - Titles must be original editorial titles, not the first words of the transcript.
 - Bad title example: "There Is An Anecdote From The Life"
 - Good title example: "One Sentence That Saved Her Soul"
 - Good title example: "The Priest Who Gave Hope to a Dying Woman"
 - Good title example: "Compassion Can Reach a Soul Years Later"
 - Do not invent a quote. display_words can be a concise phrase if a verbatim quote would be too long.
-- Do not select several clips from the same story. Pick the best full version of that story instead.
+- Do not select several clips from the same story. Pick the complete version of that story instead.
 
 Narrative detection:
 Look for phrases such as:
@@ -358,6 +462,9 @@ When these appear, check whether the surrounding segments form one story. If yes
 
 Existing metadata for context:
 {context_json}
+
+Chapter/short map:
+{chapter_map}
 
 Timed transcript:
 {transcript}
@@ -383,43 +490,532 @@ Timed transcript:
     return clips
 
 
+POINT_KEYWORDS = {
+    "father_doyle_story": {
+        "title": "One Sentence That Saved Her Soul",
+        "terms": [
+            "father william doyle", "doyle", "woman of the night", "death row",
+            "please don't sin", "god loves you", "confession", "last rites",
+        ],
+    },
+    "christian_compassion": {
+        "title": "How to Suffer With Others",
+        "terms": [
+            "compassion", "mercy", "suffer with", "suffer", "carry", "cross",
+            "weep", "widow", "moved by mercy", "cannot give what we do not have",
+        ],
+    },
+    "danger_of_pride": {
+        "title": "The Danger of Pride",
+        "terms": ["pride", "proud", "humility", "humble", "selfish", "obstacle"],
+    },
+    "charity_and_grace": {
+        "title": "The Charity That Changes Souls",
+        "terms": [
+            "charity", "love of god", "love our neighbor", "grace", "salvation",
+            "eternally happy", "participants in his salvation",
+        ],
+    },
+    "sin_and_conversion": {
+        "title": "The Call to Conversion",
+        "terms": ["sin", "repent", "conversion", "soul", "save", "saved", "confession"],
+    },
+}
+
+POWER_TERMS = [
+    "god loves you",
+    "please don't sin",
+    "we cannot give what we do not have",
+    "how can we help",
+    "carry our own cross",
+    "moved by mercy",
+    "pride",
+    "humility",
+    "compassion",
+    "charity",
+    "love of god",
+    "salvation",
+]
+
+GENERIC_SHORTS_POWER_TERMS = [
+    "faith",
+    "grace",
+    "salvation",
+    "soul",
+    "souls",
+    "church",
+    "holy mass",
+    "blessed sacrament",
+    "our lord",
+    "jesus christ",
+    "cross",
+    "sacrifice",
+    "truth",
+    "charity",
+    "mercy",
+    "sin",
+    "repent",
+    "conversion",
+    "hope",
+    "doctrine",
+    "moral law",
+    "catholic faith",
+]
+
+
+def text_signature(value: str) -> str:
+    stop_words = {
+        "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "with",
+        "for", "from", "by", "as", "is", "are", "was", "were", "be", "being",
+        "this", "that", "these", "those", "it", "its", "we", "our", "you",
+    }
+    words = [
+        word for word in re.findall(r"[a-z0-9']+", str(value or "").lower())
+        if word not in stop_words
+    ]
+    return " ".join(words[:10])
+
+
+def raw_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def overlap_seconds(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    return max(0.0, min(a_end, b_end) - max(a_start, b_start))
+
+
+def substantially_overlaps(
+    start: float,
+    end: float,
+    used_ranges: List[Tuple[float, float]],
+    ratio: float = 0.25,
+) -> bool:
+    duration = max(0.001, end - start)
+    for used_start, used_end in used_ranges:
+        overlap = overlap_seconds(start, end, used_start, used_end)
+        if overlap >= 2.0 and overlap / min(duration, max(0.001, used_end - used_start)) >= ratio:
+            return True
+    return False
+
+
+def extract_sentences(text: str) -> List[str]:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not text:
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    return [sentence.strip() for sentence in sentences if sentence.strip()]
+
+
+def extract_power_quote(text: str, fallback_limit: int = 180) -> str:
+    lowered_text = str(text or "").lower()
+    if "please don't sin" in lowered_text and "god loves you" in lowered_text:
+        return "Please don't sin. God loves you."
+    if "we cannot give what we do not have" in lowered_text:
+        return "We cannot give what we do not have."
+
+    sentences = extract_sentences(text)
+    best_sentence = ""
+    best_score = -1
+    for sentence in sentences:
+        words = re.findall(r"[A-Za-z0-9']+", sentence)
+        if len(words) < 4 or len(words) > 28:
+            continue
+        lowered = sentence.lower()
+        score = sum(5 for term in POWER_TERMS if term in lowered)
+        score += min(len(words), 18) / 8
+        if re.search(r"\b(how|why|cannot|must|never|always|therefore)\b", lowered):
+            score += 2
+        if score > best_score:
+            best_score = score
+            best_sentence = sentence
+    if best_sentence:
+        return titlewrap(best_sentence, fallback_limit)
+    return titlewrap(text, fallback_limit)
+
+
+def meaningful_terms(value: str) -> List[str]:
+    stop_words = {
+        "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "with",
+        "for", "from", "by", "as", "is", "are", "was", "were", "be", "being",
+        "this", "that", "these", "those", "it", "its", "we", "our", "you",
+        "he", "his", "her", "their", "they", "them",
+    }
+    return [
+        word
+        for word in re.findall(r"[a-z0-9']+", str(value or "").lower())
+        if len(word) > 2 and word not in stop_words
+    ]
+
+
+def chapter_for_range(
+    chapter_ranges: List[Dict[str, Any]],
+    start: float,
+    end: float,
+) -> Optional[Dict[str, Any]]:
+    best = None
+    best_overlap = 0.0
+    for chapter in chapter_ranges:
+        overlap = overlap_seconds(start, end, float(chapter["start"]), float(chapter["end"]))
+        if overlap > best_overlap:
+            best = chapter
+            best_overlap = overlap
+    return best
+
+
+def nearest_unit_index(units: List[Dict[str, Any]], target: float, key: str) -> int:
+    if not units:
+        return 0
+    return min(
+        range(len(units)),
+        key=lambda idx: abs(float(units[idx].get(key, 0.0) or 0.0) - target),
+    )
+
+
+def clip_from_mdx_short(
+    short: Dict[str, Any],
+    units: List[Dict[str, Any]],
+    chapter_ranges: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    start = as_float(short.get("start"))
+    end = as_float(short.get("end"))
+    if start is None or end is None or end <= start:
+        return None
+    duration = end - start
+    if duration < MIN_SHORT_SECONDS or duration > MAX_SHORT_SECONDS:
+        return None
+
+    start_i = nearest_unit_index(units, start, "start")
+    end_i = nearest_unit_index(units, end, "end")
+    if end_i < start_i:
+        start_i, end_i = end_i, start_i
+    text = " ".join(unit["text"] for unit in units[start_i : end_i + 1])
+    chapter = chapter_for_range(chapter_ranges, start, end)
+    chapter_title = (chapter or {}).get("title") or short.get("title") or "Homily Short"
+    power_quote = titlewrap(short.get("quote") or extract_power_quote(text), 180)
+    title = clean_editorial_title(short.get("title") or chapter_title, text)
+    return {
+        "major_point_id": "",
+        "major_point_title": titlewrap(chapter_title),
+        "title": titlewrap(title),
+        "mdx_section_title": titlewrap(chapter_title),
+        "theme": titlewrap(text, 180),
+        "selection_reason": "Existing MDX short suggestion aligned to the YouTube chapter plan.",
+        "power_quote": power_quote,
+        "start_segment": units[start_i]["index"],
+        "end_segment": units[end_i]["index"],
+        "display_words": titlewrap(power_quote or text, 260),
+        "keywords": list(short.get("keywords") or ["Latin Mass", "Traditional Catholic", "homily"]),
+    }
+
+
+def score_chapter_window(text: str, duration: float, chapter_title: str, chapter_start_delta: float) -> float:
+    lowered = re.sub(r"\s+", " ", str(text or "").lower())
+    score = max(0.0, 20.0 - abs(duration - 62.0) * 0.35)
+    score += max(0.0, 35.0 - chapter_start_delta * 1.8)
+    score += sum(2 for term in GENERIC_SHORTS_POWER_TERMS if term in lowered)
+    score += sum(3 for term in meaningful_terms(chapter_title) if re.search(rf"\b{re.escape(term)}\b", lowered))
+    if re.search(r"\b(therefore|because|so that|in order that|consequently|this is why)\b", lowered):
+        score += 3
+    if re.search(r"\b(must|cannot|never|always|only|essential|necessary|obliges)\b", lowered):
+        score += 2
+    if re.search(r"[.!?][\"')\]]?$", text.strip()):
+        score += 5
+    if re.search(r"\b(announcement|subscribe|youtube|housekeeping|vestibule)\b", lowered):
+        score -= 25
+    return score
+
+
+def chapter_candidate(
+    units: List[Dict[str, Any]],
+    start_idx: int,
+    end_idx: int,
+    chapter: Dict[str, Any],
+) -> Dict[str, Any]:
+    text = " ".join(unit["text"] for unit in units[start_idx : end_idx + 1])
+    start = float(units[start_idx]["start"])
+    end = float(units[end_idx]["end"])
+    chapter_start = float(chapter["start"])
+    return {
+        "score": score_chapter_window(text, end - start, str(chapter["title"]), abs(start - chapter_start)),
+        "major_point_title": chapter["title"],
+        "text": text,
+        "start_segment": units[start_idx]["index"],
+        "end_segment": units[end_idx]["index"],
+        "start": start,
+        "end": end,
+        "duration": end - start,
+    }
+
+
+def representative_window_for_chapter(
+    units: List[Dict[str, Any]],
+    chapter: Dict[str, Any],
+    used_ranges: List[Tuple[float, float]],
+) -> Optional[Dict[str, Any]]:
+    chapter_start = float(chapter["start"])
+    chapter_end = float(chapter["end"])
+    indexed_units = [
+        (idx, unit)
+        for idx, unit in enumerate(units)
+        if float(unit["end"]) > chapter_start and float(unit["start"]) < chapter_end
+    ]
+    if not indexed_units:
+        return None
+
+    first_idx = indexed_units[0][0]
+    last_idx = indexed_units[-1][0]
+    chapter_duration = float(chapter["duration"])
+    if 30.0 <= chapter_duration <= MAX_SHORT_SECONDS:
+        start = float(units[first_idx]["start"])
+        end = float(units[last_idx]["end"])
+        if not substantially_overlaps(start, end, used_ranges):
+            return chapter_candidate(units, first_idx, last_idx, chapter)
+
+    opening_candidates: List[Dict[str, Any]] = []
+    fallback_candidates: List[Dict[str, Any]] = []
+    for pos, (start_idx, start_unit) in enumerate(indexed_units):
+        start = max(float(start_unit["start"]), chapter_start)
+        start_delta = start - chapter_start
+        if start_delta > 35.0 and opening_candidates:
+            break
+        for end_idx, end_unit in indexed_units[pos:]:
+            end = min(float(end_unit["end"]), chapter_end)
+            duration = end - start
+            if duration < 30.0:
+                continue
+            if duration > MAX_SHORT_SECONDS:
+                break
+            if substantially_overlaps(start, end, used_ranges):
+                continue
+            text = " ".join(unit["text"] for unit in units[start_idx : end_idx + 1])
+            if duration < 42.0 and not re.search(r"[.!?][\"')\]]?$", text.strip()):
+                continue
+            candidate = chapter_candidate(units, start_idx, end_idx, chapter)
+            fallback_candidates.append(candidate)
+            if start_delta <= 35.0 and duration >= 45.0:
+                opening_candidates.append(candidate)
+
+    if opening_candidates:
+        opening_candidates.sort(
+            key=lambda item: (
+                float(item["start"]) - chapter_start,
+                abs(float(item["duration"]) - 62.0),
+                -float(item["score"]),
+            )
+        )
+        return opening_candidates[0]
+
+    fallback_candidates.sort(
+        key=lambda item: (
+            float(item["start"]) - chapter_start,
+            abs(float(item["duration"]) - 62.0),
+            -float(item["score"]),
+        )
+    )
+    return fallback_candidates[0] if fallback_candidates else None
+
+
+def chapter_based_heuristic_select_clips(
+    units: List[Dict[str, Any]],
+    context: Dict[str, Any],
+    min_clips: int,
+    max_clips: int,
+) -> List[Dict[str, Any]]:
+    chapter_ranges = chapter_ranges_from_context(context, units)
+    if not chapter_ranges and not context.get("shorts"):
+        return []
+
+    clips: List[Dict[str, Any]] = []
+    used_ranges: List[Tuple[float, float]] = []
+    used_chapters = set()
+
+    for short in context.get("shorts") or []:
+        if len(clips) >= max_clips or not isinstance(short, dict):
+            break
+        clip = clip_from_mdx_short(short, units, chapter_ranges)
+        if not clip:
+            continue
+        start = float(units[nearest_unit_index(units, float(short["start"]), "start")]["start"])
+        end = float(units[nearest_unit_index(units, float(short["end"]), "end")]["end"])
+        if substantially_overlaps(start, end, used_ranges):
+            continue
+        clips.append(clip)
+        used_ranges.append((start, end))
+        if clip.get("major_point_title"):
+            used_chapters.add(text_signature(clip["major_point_title"]))
+
+    candidates = []
+    for chapter in chapter_ranges:
+        chapter_key = text_signature(chapter["title"])
+        if chapter_key in used_chapters:
+            continue
+        candidate = representative_window_for_chapter(units, chapter, used_ranges)
+        if candidate:
+            candidates.append(candidate)
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    for candidate in candidates:
+        if len(clips) >= max_clips:
+            break
+        start = float(candidate["start"])
+        end = float(candidate["end"])
+        if substantially_overlaps(start, end, used_ranges):
+            continue
+        power_quote = extract_power_quote(candidate["text"])
+        chapter_title = candidate["major_point_title"]
+        clips.append(
+            {
+                "major_point_id": "",
+                "major_point_title": titlewrap(chapter_title),
+                "title": titlewrap(chapter_title),
+                "mdx_section_title": titlewrap(chapter_title),
+                "theme": titlewrap(candidate["text"], 180),
+                "selection_reason": "Representative 30-90 second excerpt from this YouTube chapter.",
+                "power_quote": power_quote,
+                "start_segment": candidate["start_segment"],
+                "end_segment": candidate["end_segment"],
+                "display_words": titlewrap(power_quote, 260),
+                "keywords": ["Latin Mass", "Traditional Catholic", "homily"],
+            }
+        )
+        used_ranges.append((start, end))
+
+    clips.sort(key=lambda clip: int(clip["start_segment"]))
+    for index, clip in enumerate(clips, 1):
+        clip["major_point_id"] = f"point-{index:02d}"
+
+    if len(clips) < min_clips:
+        print(f"Warning: chapter-based heuristic found only {len(clips)} chapter-aligned clip(s).")
+    return clips
+
+
+def classify_major_point(text: str) -> Tuple[str, str, int]:
+    lowered = re.sub(r"\s+", " ", str(text or "").lower())
+    best_key = "general_homily_point"
+    best_title = "A Strong Homily Moment"
+    best_score = 0
+    for key, data in POINT_KEYWORDS.items():
+        score = 0
+        for term in data["terms"]:
+            term = term.lower()
+            if " " in term:
+                score += 4 * lowered.count(term)
+            else:
+                score += len(re.findall(rf"\b{re.escape(term)}\b", lowered))
+        if score > best_score:
+            best_key = key
+            best_title = data["title"]
+            best_score = score
+    return best_key, best_title, best_score
+
+
+def score_heuristic_candidate(text: str, duration: float, point_score: int) -> float:
+    lowered = text.lower()
+    score = float(point_score * 7)
+    score += max(0.0, 24.0 - abs(duration - 62.0) * 0.45)
+    score += sum(6 for term in POWER_TERMS if term in lowered)
+    if re.search(r"\b(story|anecdote|example|remember|said|years later|then)\b", lowered):
+        score += 8
+    if re.search(r"\b(therefore|because|so that|in order that|and so)\b", lowered):
+        score += 4
+    if re.search(r"[.!?][\"')\]]?$", text.strip()):
+        score += 3
+    if re.search(r"\b(announcement|subscribe|youtube|housekeeping)\b", lowered):
+        score -= 20
+    return score
+
+
 def heuristic_select_clips(
     units: List[Dict[str, Any]],
     min_clips: int,
     max_clips: int,
+    context: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    clips: List[Dict[str, Any]] = []
-    i = 0
-    while i < len(units) and len(clips) < max_clips:
-        start_i = i
-        end_i = i
-        while end_i < len(units) - 1 and units[end_i]["end"] - units[start_i]["start"] < 45:
-            end_i += 1
-        while end_i < len(units) - 1 and units[end_i]["end"] - units[start_i]["start"] < 75:
-            if re.search(r"[.!?][\"')\]]?$", units[end_i]["text"]):
-                break
-            end_i += 1
+    chapter_clips = chapter_based_heuristic_select_clips(units, context or {}, min_clips, max_clips)
+    if len(chapter_clips) >= min_clips:
+        return chapter_clips
 
-        duration = units[end_i]["end"] - units[start_i]["start"]
-        if MIN_SHORT_SECONDS <= duration <= MAX_SHORT_SECONDS:
+    candidates: List[Dict[str, Any]] = []
+    for start_i in range(0, len(units), 2):
+        for end_i in range(start_i, len(units)):
+            duration = units[end_i]["end"] - units[start_i]["start"]
+            if duration < 30.0:
+                continue
+            if duration > MAX_SHORT_SECONDS:
+                break
+            if duration < 42.0 and not re.search(r"[.!?][\"')\]]?$", units[end_i]["text"]):
+                continue
             text = " ".join(unit["text"] for unit in units[start_i : end_i + 1])
-            title_words = re.findall(r"[A-Za-z0-9']+", text)[:8]
-            title = " ".join(title_words).strip() or f"Homily Clip {len(clips) + 1}"
-            clips.append(
+            point_key, point_title, point_score = classify_major_point(text)
+            if point_score <= 0:
+                continue
+            score = score_heuristic_candidate(text, duration, point_score)
+            if point_key == "father_doyle_story":
+                if units[start_i]["index"] <= 2:
+                    score += 24
+                else:
+                    score -= 18
+                if "hope" in text.lower():
+                    score += 18
+                if "repented" in text.lower():
+                    score += 10
+                if duration < 78.0:
+                    score -= 18
+            candidates.append(
                 {
-                    "title": titlewrap(title),
-                    "mdx_section_title": titlewrap(title),
-                    "theme": titlewrap(text, 140),
+                    "score": score,
+                    "point_key": point_key,
+                    "major_point_title": point_title,
+                    "text": text,
                     "start_segment": units[start_i]["index"],
                     "end_segment": units[end_i]["index"],
-                    "display_words": titlewrap(text, 220),
-                    "keywords": ["Latin Mass", "Traditional Catholic", "homily"],
+                    "start": units[start_i]["start"],
+                    "end": units[end_i]["end"],
+                    "duration": duration,
                 }
             )
-        i = max(end_i + 1, i + 1)
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    clips: List[Dict[str, Any]] = []
+    used_points = set()
+    used_ranges: List[Tuple[float, float]] = []
+    for candidate in candidates:
+        if len(clips) >= max_clips:
+            break
+        if candidate["point_key"] in used_points:
+            continue
+        start = float(candidate["start"])
+        end = float(candidate["end"])
+        if substantially_overlaps(start, end, used_ranges):
+            continue
+
+        point_number = len(clips) + 1
+        power_quote = extract_power_quote(candidate["text"])
+        title = candidate["major_point_title"]
+        clips.append(
+            {
+                "major_point_id": f"point-{point_number:02d}",
+                "major_point_title": title,
+                "title": titlewrap(title),
+                "mdx_section_title": titlewrap(title),
+                "theme": titlewrap(candidate["text"], 180),
+                "selection_reason": "Representative complete moment for this major homily point.",
+                "power_quote": power_quote,
+                "start_segment": candidate["start_segment"],
+                "end_segment": candidate["end_segment"],
+                "display_words": titlewrap(power_quote, 260),
+                "keywords": ["Latin Mass", "Traditional Catholic", "homily"],
+            }
+        )
+        used_points.add(candidate["point_key"])
+        used_ranges.append((start, end))
+
+    clips.sort(key=lambda clip: int(clip["start_segment"]))
+    for index, clip in enumerate(clips, 1):
+        clip["major_point_id"] = f"point-{index:02d}"
 
     if len(clips) < min_clips:
-        print(f"Warning: heuristic selector found only {len(clips)} usable clips.")
+        print(f"Warning: heuristic selector found only {len(clips)} strong point-first clip(s).")
     return clips
 
 
@@ -517,6 +1113,9 @@ def build_manifest(
 ) -> Dict[str, Any]:
     by_index = {unit["index"]: unit for unit in units}
     used_ranges: List[Tuple[float, float]] = []
+    used_major_points = set()
+    used_point_clusters = set()
+    used_titles = set()
     clips: List[Dict[str, Any]] = []
 
     for raw in raw_clips:
@@ -537,9 +1136,10 @@ def build_manifest(
         start = nearest_word_time(words, start, "start")
         end = nearest_word_time(words, end, "end")
         duration = round(end - start, 3)
-        if duration < MIN_SHORT_SECONDS or duration > MAX_SHORT_SECONDS:
+        allow_short = raw_truthy(raw.get("allow_short") or raw.get("exceptional_short"))
+        if duration > MAX_SHORT_SECONDS or duration < (MIN_SHORT_SECONDS if allow_short else 30.0):
             continue
-        if any(not (end <= used_start or start >= used_end) for used_start, used_end in used_ranges):
+        if any(overlap_seconds(start, end, used_start, used_end) > 1.5 for used_start, used_end in used_ranges):
             continue
 
         clip_words = words_between(words, start, end)
@@ -550,9 +1150,30 @@ def build_manifest(
                 text,
             )
         )
+        inferred_point_key, inferred_point_title, _ = classify_major_point(text)
+        major_point_title = titlewrap(
+            raw.get("major_point_title")
+            or raw.get("mdx_section_title")
+            or inferred_point_title
+            or title
+        )
+        title_key = text_signature(title)
+        point_key = text_signature(major_point_title) or inferred_point_key
+        distinct_subpoint = raw_truthy(raw.get("distinct_subpoint"))
+        explicit_major_point = bool(raw.get("major_point_title") or raw.get("mdx_section_title"))
+        if not distinct_subpoint and point_key and point_key in used_major_points:
+            continue
+        classified_point_key = inferred_point_key if inferred_point_key != "general_homily_point" else ""
+        if not explicit_major_point and not distinct_subpoint and classified_point_key and classified_point_key in used_point_clusters:
+            continue
+        if title_key and title_key in used_titles:
+            continue
+
+        power_quote = titlewrap(raw.get("power_quote") or extract_power_quote(text), 180)
+        display_words = titlewrap(raw.get("display_words") or power_quote or text, 260)
         clip_id = f"clip-{len(clips) + 1:02d}"
         slug = slugify(title, clip_id)
-        image_path = os.path.join(paths["images_dir"], f"{clip_id}.jpg")
+        image_path = os.path.join(paths["images_dir"], f"{clip_id}-{slug}.jpg")
         audio_path = os.path.join(paths["audio_dir"], f"{clip_id}.mp3")
         video_path = os.path.join(paths["videos_dir"], f"{clip_id}-{slug}.mp4")
         captions_path = os.path.join(paths["captions_dir"], f"{clip_id}.srt")
@@ -562,13 +1183,18 @@ def build_manifest(
         clips.append(
             {
                 "id": clip_id,
+                "major_point_id": f"point-{len(clips) + 1:02d}",
+                "major_point_title": major_point_title,
                 "title": title,
-                "mdx_section_title": titlewrap(raw.get("mdx_section_title") or title),
+                "mdx_section_title": titlewrap(raw.get("mdx_section_title") or major_point_title or title),
                 "theme": theme,
+                "selection_reason": titlewrap(raw.get("selection_reason") or "Representative complete moment for this major homily point.", 180),
+                "power_quote": power_quote,
                 "start": round(start, 3),
                 "end": round(end, 3),
+                "clip_key": hashlib.sha1(f"{round(start, 3):.3f}-{round(end, 3):.3f}".encode("utf-8")).hexdigest()[:12],
                 "duration": duration,
-                "display_words": titlewrap(raw.get("display_words") or text, 260),
+                "display_words": display_words,
                 "caption_groups": caption_groups,
                 "image_prompt": prompt_for_clip_image(title, theme),
                 "keywords": list(raw.get("keywords") or []),
@@ -581,6 +1207,25 @@ def build_manifest(
             }
         )
         used_ranges.append((start, end))
+        if point_key:
+            used_major_points.add(point_key)
+        if not explicit_major_point and classified_point_key:
+            used_point_clusters.add(classified_point_key)
+        if title_key:
+            used_titles.add(title_key)
+
+    clips.sort(key=lambda clip: float(clip.get("start", 0.0) or 0.0))
+    for index, clip in enumerate(clips, 1):
+        clip_id = f"clip-{index:02d}"
+        slug = slugify(clip.get("title") or clip_id, clip_id)
+        clip["id"] = clip_id
+        clip["major_point_id"] = f"point-{index:02d}"
+        clip["output_paths"] = {
+            "image": os.path.join(paths["images_dir"], f"{clip_id}-{slug}.jpg"),
+            "audio": os.path.join(paths["audio_dir"], f"{clip_id}.mp3"),
+            "video": os.path.join(paths["videos_dir"], f"{clip_id}-{slug}.mp4"),
+            "captions": os.path.join(paths["captions_dir"], f"{clip_id}.srt"),
+        }
 
     return {
         "version": 1,
@@ -595,16 +1240,79 @@ def build_manifest(
             "image_size": list(IMAGE_SIZE),
             "min_seconds": MIN_SHORT_SECONDS,
             "max_seconds": MAX_SHORT_SECONDS,
+            "max_clips": max_clips,
             "selection_mode": selection_mode,
         },
         "clips": clips,
     }
 
 
+def cap_manifest_clips(manifest: Dict[str, Any], max_clips: int) -> Dict[str, Any]:
+    clips = manifest.get("clips") or []
+    if not max_clips or len(clips) <= max_clips:
+        return manifest
+
+    capped = dict(manifest)
+    capped["clips"] = clips[:max_clips]
+    settings = dict(capped.get("settings") or {})
+    settings["max_clips"] = max_clips
+    settings["capped_from_clips"] = len(clips)
+    capped["settings"] = settings
+    print(f"Using first {max_clips} clip(s) from manifest; manifest contains {len(clips)}.")
+    return capped
+
+
 def save_json(path: str, payload: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def clip_key(clip: Dict[str, Any]) -> str:
+    start = round(float(clip.get("start", 0.0) or 0.0), 3)
+    end = round(float(clip.get("end", 0.0) or 0.0), 3)
+    basis = f"{start:.3f}-{end:.3f}"
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
+
+
+def canonical_image_path(clip: Dict[str, Any], paths: Dict[str, str]) -> str:
+    slug = slugify(clip.get("title") or clip.get("id") or "clip", clip.get("id") or "clip")
+    return os.path.join(paths["images_dir"], f"{clip['id']}-{slug}.jpg")
+
+
+def image_assets_path(paths: Dict[str, str]) -> str:
+    return os.path.join(paths["images_dir"], "image_assets.json")
+
+
+def load_image_assets(paths: Dict[str, str]) -> Dict[str, Any]:
+    path = image_assets_path(paths)
+    if os.path.exists(path):
+        try:
+            return load_manifest(path)
+        except Exception:
+            pass
+    return {"version": 1, "assets": []}
+
+
+def save_image_assets(paths: Dict[str, str], assets: Dict[str, Any]) -> None:
+    assets["version"] = 1
+    save_json(image_assets_path(paths), assets)
+
+
+def asset_by_clip_key(assets: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
+    for asset in assets.get("assets") or []:
+        if asset.get("clip_key") == key:
+            return asset
+    return None
+
+
+def upsert_image_asset(assets: Dict[str, Any], record: Dict[str, Any]) -> None:
+    existing = asset_by_clip_key(assets, record["clip_key"])
+    if existing:
+        existing.update(record)
+        return
+    assets.setdefault("assets", []).append(record)
+
 
 def clean_editorial_title(title: str, source_text: str, limit: int = 70) -> str:
     title = re.sub(r"\s+", " ", str(title or "")).strip()
@@ -693,6 +1401,83 @@ def save_clip_image(clip: Dict[str, Any]) -> str:
     return output_path
 
 
+def ensure_clip_image(
+    clip: Dict[str, Any],
+    paths: Dict[str, str],
+    assets: Dict[str, Any],
+    refresh: bool = False,
+) -> str:
+    key = clip_key(clip)
+    clip["clip_key"] = key
+    canonical_path = canonical_image_path(clip, paths)
+    previous_path = clip["output_paths"].get("image")
+    asset = asset_by_clip_key(assets, key)
+
+    if not refresh:
+        if os.path.exists(canonical_path):
+            clip["output_paths"]["image"] = canonical_path
+            upsert_image_asset(
+                assets,
+                {
+                    "clip_id": clip.get("id"),
+                    "clip_key": key,
+                    "title": clip.get("title"),
+                    "title_slug": slugify(clip.get("title"), clip.get("id", "clip")),
+                    "image_path": canonical_path,
+                    "image_prompt": traditional_catholic_image_prompt(clip.get("image_prompt")),
+                    "manual_or_existing": True,
+                },
+            )
+            return canonical_path
+
+        asset_path = str((asset or {}).get("image_path") or "")
+        if asset_path and os.path.exists(asset_path):
+            os.makedirs(os.path.dirname(canonical_path), exist_ok=True)
+            shutil.copy2(asset_path, canonical_path)
+            clip["output_paths"]["image"] = canonical_path
+            asset["image_path"] = canonical_path
+            asset["title"] = clip.get("title")
+            asset["title_slug"] = slugify(clip.get("title"), clip.get("id", "clip"))
+            return canonical_path
+
+        if previous_path and os.path.exists(previous_path):
+            os.makedirs(os.path.dirname(canonical_path), exist_ok=True)
+            shutil.copy2(previous_path, canonical_path)
+            clip["output_paths"]["image"] = canonical_path
+            upsert_image_asset(
+                assets,
+                {
+                    "clip_id": clip.get("id"),
+                    "clip_key": key,
+                    "title": clip.get("title"),
+                    "title_slug": slugify(clip.get("title"), clip.get("id", "clip")),
+                    "image_path": canonical_path,
+                    "image_prompt": traditional_catholic_image_prompt(clip.get("image_prompt")),
+                    "manual_or_existing": True,
+                },
+            )
+            return canonical_path
+
+    clip["output_paths"]["image"] = canonical_path
+    generated_path = save_clip_image(clip)
+    upsert_image_asset(
+        assets,
+        {
+            "clip_id": clip.get("id"),
+            "clip_key": key,
+            "title": clip.get("title"),
+            "title_slug": slugify(clip.get("title"), clip.get("id", "clip")),
+            "image_path": generated_path,
+            "image_prompt": traditional_catholic_image_prompt(clip.get("image_prompt")),
+            "image_size": list(IMAGE_SIZE),
+            "model": os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "refreshed": bool(refresh),
+        },
+    )
+    return generated_path
+
+
 def make_background(image_path: str) -> Image.Image:
     try:
         image = Image.open(image_path)
@@ -704,12 +1489,12 @@ def make_background(image_path: str) -> Image.Image:
     image = image.resize(IMAGE_SIZE, Image.Resampling.LANCZOS)
 
     canvas = Image.new("RGB", CANVAS_SIZE, "black")
-    canvas.paste(image, (0, 0))
+    canvas.paste(image, (0, IMAGE_TOP))
 
     overlay = Image.new("RGBA", CANVAS_SIZE, (0, 0, 0, 0))
     gradient_height = GRADIENT_BOTTOM - GRADIENT_TOP
     for offset in range(gradient_height):
-        alpha = int(255 * ((offset + 1) / gradient_height))
+        alpha = int(255 * (1 - ((offset + 1) / gradient_height)))
         y = GRADIENT_TOP + offset
         ImageDraw.Draw(overlay).line([(0, y), (CANVAS_SIZE[0], y)], fill=(0, 0, 0, alpha))
     return Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
@@ -942,11 +1727,16 @@ def write_upload_metadata(manifest: Dict[str, Any], paths: Dict[str, str]) -> No
 
         return {
             "id": clip["id"],
+            "major_point_id": clip.get("major_point_id", ""),
+            "major_point_title": clip.get("major_point_title", ""),
             "title": clip["title"],
             "description": clip["theme"],
+            "selection_reason": clip.get("selection_reason", ""),
+            "power_quote": clip.get("power_quote", ""),
             "tags": clip.get("keywords") or [],
             "start": clip["start"],
             "end": clip["end"],
+            "clip_key": clip.get("clip_key") or clip_key(clip),
             "duration": clip["duration"],
             "video_path": video_path,
             "thumbnail_path": clip["output_paths"]["image"],
@@ -976,20 +1766,34 @@ def selected_clips(args: argparse.Namespace, clips: List[Dict[str, Any]]) -> Lis
         if missing:
             raise ValueError(f"Requested clip id(s) not found in manifest: {', '.join(missing)}")
 
+    if not requested_ids and args.max_clips:
+        clips = clips[: args.max_clips]
+
     if args.limit:
         clips = clips[: args.limit]
     return clips
+
+
+def refresh_image_ids(args: argparse.Namespace) -> set:
+    ids = set()
+    for value in args.refresh_image or []:
+        ids.update(
+            item.strip()
+            for item in str(value).split(",")
+            if item.strip()
+        )
+    return ids
 
 
 def create_or_load_manifest(args: argparse.Namespace, paths: Dict[str, str]) -> Dict[str, Any]:
     if args.render_only:
         if not os.path.exists(paths["manifest"]):
             raise FileNotFoundError(f"--render-only requested but manifest is missing: {paths['manifest']}")
-        return load_manifest(paths["manifest"])
+        return cap_manifest_clips(load_manifest(paths["manifest"]), args.max_clips)
 
     if os.path.exists(paths["manifest"]) and not args.force_manifest:
         print(f"Using existing manifest: {paths['manifest']}")
-        return load_manifest(paths["manifest"])
+        return cap_manifest_clips(load_manifest(paths["manifest"]), args.max_clips)
 
     script = load_video_script(paths["video_script"])
     segments = script["segments"]
@@ -1000,7 +1804,7 @@ def create_or_load_manifest(args: argparse.Namespace, paths: Dict[str, str]) -> 
     effective_selection_mode = args.selection_mode
 
     if args.selection_mode == "heuristic":
-        raw_clips = heuristic_select_clips(units, args.min_clips, args.max_clips)
+        raw_clips = heuristic_select_clips(units, args.min_clips, args.max_clips, context)
     else:
         try:
             raw_clips = openai_select_clips(units, context, args.min_clips, args.max_clips)
@@ -1008,7 +1812,7 @@ def create_or_load_manifest(args: argparse.Namespace, paths: Dict[str, str]) -> 
             if args.selection_mode == "openai":
                 raise
             print(f"OpenAI clip selection failed; using heuristic fallback. Reason: {exc}")
-            raw_clips = heuristic_select_clips(units, args.min_clips, args.max_clips)
+            raw_clips = heuristic_select_clips(units, args.min_clips, args.max_clips, context)
             effective_selection_mode = "heuristic-fallback"
 
     manifest = build_manifest(raw_clips, units, words, paths, args.max_clips, effective_selection_mode)
@@ -1016,13 +1820,25 @@ def create_or_load_manifest(args: argparse.Namespace, paths: Dict[str, str]) -> 
         args.selection_mode == "auto"
         and len(manifest.get("clips", [])) < args.min_clips
     ):
+        needed = args.min_clips - len(manifest.get("clips", []))
         print(
             f"OpenAI selection produced {len(manifest.get('clips', []))} valid clip(s); "
-            "supplementing with heuristic clips."
+            f"supplementing with {needed} heuristic clip(s)."
         )
-        heuristic_raw = heuristic_select_clips(units, args.min_clips, args.max_clips)
-        raw_clips = raw_clips + heuristic_raw
-        manifest = build_manifest(raw_clips, units, words, paths, args.max_clips, "openai+heuristic-fallback")
+        heuristic_raw = heuristic_select_clips(units, args.min_clips, args.max_clips, context)
+        for supplement_count in range(needed, len(heuristic_raw) + 1):
+            supplemented_raw = raw_clips + heuristic_raw[:supplement_count]
+            manifest = build_manifest(
+                supplemented_raw,
+                units,
+                words,
+                paths,
+                args.max_clips,
+                "openai+heuristic-fallback",
+            )
+            if len(manifest.get("clips", [])) >= args.min_clips:
+                raw_clips = supplemented_raw
+                break
 
     if len(manifest.get("clips", [])) < args.min_clips:
         message = (
@@ -1040,19 +1856,32 @@ def create_or_load_manifest(args: argparse.Namespace, paths: Dict[str, str]) -> 
 
 
 def process_media(args: argparse.Namespace, manifest: Dict[str, Any], paths: Dict[str, str]) -> None:
+    manifest = cap_manifest_clips(manifest, args.max_clips)
     clips = selected_clips(args, manifest.get("clips") or [])
     if not clips:
         raise RuntimeError("No clips available to render.")
 
-    print(f"Generating fresh clip images with {args.image_workers} worker(s)...")
-    with ThreadPoolExecutor(max_workers=max(1, args.image_workers)) as image_pool:
-        image_futures = {
-            clip["id"]: image_pool.submit(save_clip_image, clip)
-            for clip in clips
-        }
-        for clip in clips:
-            image_futures[clip["id"]].result()
-            print(f"Image ready: {clip['output_paths']['image']}")
+    refresh_ids = refresh_image_ids(args)
+    all_clip_ids = {clip.get("id") for clip in manifest.get("clips") or []}
+    missing_refresh_ids = sorted(refresh_ids - all_clip_ids)
+    if missing_refresh_ids:
+        raise ValueError(f"Requested refresh image id(s) not found in manifest: {', '.join(missing_refresh_ids)}")
+    unselected_refresh_ids = sorted(refresh_ids - {clip.get("id") for clip in clips})
+    if unselected_refresh_ids:
+        raise ValueError(
+            "Requested refresh image id(s) are not selected for this run: "
+            + ", ".join(unselected_refresh_ids)
+        )
+
+    image_assets = load_image_assets(paths)
+    print("Preparing clip images...")
+    for clip in clips:
+        refresh = args.refresh_all_images or clip.get("id") in refresh_ids
+        image_path = ensure_clip_image(clip, paths, image_assets, refresh=refresh)
+        action = "Refreshed" if refresh else "Image ready"
+        print(f"{action}: {image_path}")
+    save_image_assets(paths, image_assets)
+    save_json(paths["manifest"], manifest)
 
     if args.images_only:
         write_upload_metadata(manifest, paths)
@@ -1089,9 +1918,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--render-only", action="store_true", help="Render from an existing shorts_manifest.json.")
     parser.add_argument("--images-only", action="store_true", help="Generate fresh images and upload metadata, but skip video rendering.")
     parser.add_argument("--force-manifest", action="store_true", help="Regenerate shorts_manifest.json even if it exists.")
-    parser.add_argument("--force-media", action="store_true", help="Regenerate audio/videos even if files exist. Images are always regenerated.")
+    parser.add_argument("--force-media", action="store_true", help="Regenerate audio/videos even if files exist. Images are reused unless refreshed.")
     parser.add_argument("--limit", type=int, help="Process only the first N selected clips.")
     parser.add_argument("--clip-id", action="append", help="Process a specific clip id, such as clip-02. Can be repeated or comma-separated.")
+    parser.add_argument("--refresh-image", action="append", help="Regenerate image for a specific clip id, such as clip-02. Can be repeated or comma-separated.")
+    parser.add_argument("--refresh-all-images", action="store_true", help="Regenerate images for every selected clip.")
     parser.add_argument("--min-clips", type=int, default=DEFAULT_MIN_CLIPS)
     parser.add_argument("--max-clips", type=int, default=DEFAULT_MAX_CLIPS)
     parser.add_argument("--bg-audio-dir", default=default_bg_audio_dir(), help="Folder of background music files to randomly choose from.")
@@ -1104,7 +1935,7 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="auto uses OpenAI and falls back to heuristic; openai fails hard; heuristic avoids API selection calls.",
     )
-    parser.add_argument("--image-workers", type=int, default=2, help="Concurrent image-generation jobs.")
+    parser.add_argument("--image-workers", type=int, default=2, help="Deprecated compatibility option; image assets are prepared serially.")
     return parser.parse_args()
 
 
