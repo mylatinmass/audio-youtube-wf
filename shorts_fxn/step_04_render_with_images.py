@@ -33,13 +33,75 @@ TEXT_SAFE_LEFT = 74
 TEXT_SAFE_RIGHT = 74
 TEXT_SAFE_TOP = 20
 TEXT_SAFE_BOTTOM = CANVAS_SIZE[1] - TEXT_BOX_BOTTOM
+CAPTION_MAX_LINES = 2
+CAPTION_MAX_WORDS = 7
+CAPTION_MAX_CHARS = 54
 
 BACKGROUND_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 DEFAULT_BG_MUSIC_GAIN_DB = -22.0
 DEFAULT_BG_MUSIC_FADE_MS = 2500
+MAX_BG_MUSIC_SECONDS = 55.0
 
 REQUEST_TIMEOUT = 18
 MIN_PUBLIC_DOMAIN_SCORE = 7.0
+
+PAINTING_TERMS = {
+    "painting",
+    "painted",
+    "oil",
+    "tempera",
+    "watercolor",
+    "watercolour",
+    "fresco",
+    "canvas",
+    "panel",
+    "altarpiece",
+    "manuscript illumination",
+    "illumination",
+    "gouache",
+    "pastel",
+}
+
+NON_PAINTING_TERMS = {
+    "amulet",
+    "artifact",
+    "badge",
+    "bas-relief",
+    "bowl",
+    "bronze",
+    "bust",
+    "ceramic",
+    "coin",
+    "daguerreotype",
+    "engraving",
+    "etching",
+    "figurine",
+    "fragment",
+    "furniture",
+    "glass",
+    "installation",
+    "jar",
+    "jewelry",
+    "lithograph",
+    "medal",
+    "metal",
+    "metalwork",
+    "object",
+    "ornament",
+    "photograph",
+    "poster",
+    "print",
+    "relief",
+    "scarab",
+    "sculpture",
+    "statuette",
+    "statue",
+    "stone",
+    "terracotta",
+    "textile",
+    "vessel",
+    "woodcut",
+}
 
 TRADITIONAL_CATHOLIC_IMAGE_GUARDRAIL = (
     "Traditional Catholic visual guardrails: use pre-1962 Catholic sacred art references, "
@@ -150,6 +212,7 @@ def get_clip_paths(clip: Dict[str, Any], paths: Dict[str, Path]) -> Dict[str, Pa
 
 def build_search_terms(clip: Dict[str, Any]) -> List[str]:
     terms = []
+    priority_terms = []
 
     for value in clip.get("image_search_terms", []):
         value = clean_text(value)
@@ -163,10 +226,15 @@ def build_search_terms(clip: Dict[str, Any]) -> List[str]:
     for value in [title, image_idea, power_quote]:
         if value:
             terms.append(value)
+            terms.append(f"{value} painting")
+
+    combined_clip_text = " ".join([title, image_idea, power_quote]).lower()
 
     catholic_fallbacks = [
+        f"{title} Catholic painting",
         f"{title} sacred art",
         f"{title} Renaissance painting",
+        f"{title} Baroque painting",
         f"{title} Biblical painting",
         "Christ carrying the cross",
         "Crucifixion Renaissance painting",
@@ -176,7 +244,20 @@ def build_search_terms(clip: Dict[str, Any]) -> List[str]:
         "Good Samaritan painting",
     ]
 
-    terms.extend(catholic_fallbacks)
+    if "mary" in combined_clip_text and "joseph" in combined_clip_text:
+        priority_terms = [
+            "Virgin Mary Saint Joseph oil painting",
+            "Virgin Mary Saint Joseph painting",
+            "Holy Family oil painting",
+            "Holy Family painting",
+            "The Holy Family Renaissance painting",
+            "Marriage of the Virgin painting",
+            "Saint Joseph Virgin Mary Child Jesus painting",
+            "Nativity Virgin Mary Saint Joseph painting",
+            "Flight into Egypt Holy Family painting",
+        ]
+
+    terms = priority_terms + terms + catholic_fallbacks
 
     unique = []
     seen = set()
@@ -189,10 +270,37 @@ def build_search_terms(clip: Dict[str, Any]) -> List[str]:
             unique.append(term)
             seen.add(key)
 
-    return unique[:12]
+    return unique[:16]
+
+
+def candidate_media_text(candidate: Dict[str, Any]) -> str:
+    fields = [
+        "title",
+        "medium",
+        "classification",
+        "object_type",
+        "department",
+        "artwork_type",
+    ]
+    return " ".join(clean_text(candidate.get(field, "")) for field in fields).lower()
+
+
+def candidate_is_painting(candidate: Dict[str, Any]) -> bool:
+    text = candidate_media_text(candidate)
+
+    if not text.strip():
+        return False
+
+    if any(term in text for term in NON_PAINTING_TERMS):
+        return False
+
+    return any(term in text for term in PAINTING_TERMS)
 
 
 def score_artwork(candidate: Dict[str, Any], clip: Dict[str, Any], search_term: str) -> float:
+    if not candidate_is_painting(candidate):
+        return -100.0
+
     title = clean_text(candidate.get("title", "")).lower()
     artist = clean_text(candidate.get("artist", "")).lower()
     source = clean_text(candidate.get("source", "")).lower()
@@ -242,6 +350,8 @@ def score_artwork(candidate: Dict[str, Any], clip: Dict[str, Any], search_term: 
     if candidate.get("public_domain"):
         score += 3.0
 
+    score += 3.0
+
     if source in {"the met", "art institute of chicago", "rijksmuseum", "national gallery of art"}:
         score += 0.7
 
@@ -262,6 +372,22 @@ def score_artwork(candidate: Dict[str, Any], clip: Dict[str, Any], search_term: 
     for word in re.findall(r"[a-zA-Z]+", term):
         if len(word) > 4 and word in title:
             score += 0.7
+
+    if "mary" in clip_title and "joseph" in clip_title:
+        joseph_context_terms = [
+            "joseph",
+            "holy family",
+            "nativity",
+            "flight into egypt",
+            "rest on the flight",
+            "marriage of the virgin",
+            "adoration of the shepherds",
+        ]
+
+        if any(word in title for word in joseph_context_terms):
+            score += 5.0
+        else:
+            score -= 12.0
 
     if "unknown" not in artist and artist:
         score += 0.3
@@ -318,6 +444,10 @@ def search_met(term: str, clip: Dict[str, Any], max_results: int = 5) -> List[Di
             "title": clean_text(obj.get("title", "Untitled")),
             "artist": clean_text(obj.get("artistDisplayName", "Unknown artist")),
             "date": clean_text(obj.get("objectDate", "")),
+            "medium": clean_text(obj.get("medium", "")),
+            "classification": clean_text(obj.get("classification", "")),
+            "object_type": clean_text(obj.get("objectName", "")),
+            "department": clean_text(obj.get("department", "")),
             "source_url": clean_text(obj.get("objectURL", "")),
             "image_url": image_url,
             "license": "Public Domain / Open Access",
@@ -340,7 +470,10 @@ def search_artic(term: str, clip: Dict[str, Any], max_results: int = 8) -> List[
         params={
             "q": term,
             "limit": max_results,
-            "fields": "id,title,artist_display,image_id,is_public_domain,date_display,thumbnail",
+            "fields": (
+                "id,title,artist_display,image_id,is_public_domain,date_display,thumbnail,"
+                "medium_display,classification_titles,artwork_type_title,category_titles"
+            ),
             "query[term][is_public_domain]": "true",
         },
     )
@@ -361,6 +494,10 @@ def search_artic(term: str, clip: Dict[str, Any], max_results: int = 8) -> List[
             "title": clean_text(item.get("title", "Untitled")),
             "artist": clean_text(item.get("artist_display", "Unknown artist")),
             "date": clean_text(item.get("date_display", "")),
+            "medium": clean_text(item.get("medium_display", "")),
+            "classification": clean_text(", ".join(item.get("classification_titles") or [])),
+            "object_type": clean_text(item.get("artwork_type_title", "")),
+            "department": clean_text(", ".join(item.get("category_titles") or [])),
             "source_url": f"https://www.artic.edu/artworks/{item.get('id')}",
             "image_url": image_url,
             "license": "Public Domain / CC0 when marked public domain",
@@ -413,6 +550,10 @@ def search_rijksmuseum(term: str, clip: Dict[str, Any], max_results: int = 8) ->
             "title": clean_text(item.get("title", "Untitled")),
             "artist": clean_text(item.get("principalOrFirstMaker", "Unknown artist")),
             "date": "",
+            "medium": "",
+            "classification": clean_text(", ".join(item.get("classification") or [])),
+            "object_type": clean_text(", ".join(item.get("objectTypes") or [])),
+            "department": "",
             "source_url": clean_text(item.get("links", {}).get("web", "")),
             "image_url": image_url,
             "license": "Rijksmuseum image/open data. Verify object rights if needed.",
@@ -450,6 +591,7 @@ def search_public_domain_art_for_clip(clip: Dict[str, Any]) -> Dict[str, Any]:
         all_candidates.extend(search_artic(term, clip))
         all_candidates.extend(search_rijksmuseum(term, clip))
 
+        all_candidates = [c for c in all_candidates if candidate_is_painting(c)]
         strong_candidates = [c for c in all_candidates if c.get("score", 0) >= MIN_PUBLIC_DOMAIN_SCORE]
 
         if strong_candidates:
@@ -561,6 +703,14 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[s
     return lines
 
 
+def normalize_caption_text(text: str) -> str:
+    text = clean_text(text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([([{])\s+", r"\1", text)
+    text = re.sub(r"\s+([])}])", r"\1", text)
+    return clean_text(text)
+
+
 def make_placeholder_image(clip: Dict[str, Any], output_path: Path) -> Path:
     image = Image.new("RGB", IMAGE_SIZE, (18, 18, 18))
     draw = ImageDraw.Draw(image)
@@ -625,6 +775,7 @@ def generate_ai_image_for_clip(clip: Dict[str, Any], output_path: Path) -> Optio
             f"Title: {clip.get('title', '')}\n"
             f"Image idea: {clip.get('image_idea', '')}\n"
             f"Power quote: {clip.get('power_quote', '')}\n\n"
+            "Create this as a painted sacred-art image only, not a sculpture, statue, object, artifact, photo, or museum display. "
             "Use light watercolor with ink details, reverent sacred art tone, cinematic composition. "
             f"{TRADITIONAL_CATHOLIC_IMAGE_GUARDRAIL} "
             "No text, no typography, no subtitles, no logo, no watermark."
@@ -770,7 +921,7 @@ def text_overlay(text: str, title: bool = False) -> Image.Image:
     safe_width = safe_right - safe_left
     safe_height = safe_bottom - safe_top
 
-    max_lines = 3
+    max_lines = CAPTION_MAX_LINES
     lines = wrap_text(text, font, safe_width)[:max_lines]
 
     def metrics() -> Tuple[int, List[int], List[int]]:
@@ -823,6 +974,49 @@ def cut_audio_clip(source_audio: str | Path, start: float, end: float, output_pa
     audio[start_ms:end_ms].export(output_path, format="mp3")
 
     return output_path
+
+
+def get_audio_duration_seconds(source_audio: str | Path) -> float:
+    source_audio = Path(source_audio).expanduser().resolve()
+
+    if not source_audio.exists():
+        raise FileNotFoundError(f"Audio file not found: {source_audio}")
+
+    return len(AudioSegment.from_file(source_audio)) / 1000.0
+
+
+def validate_clips_against_audio_duration(
+    clips: List[Dict[str, Any]],
+    source_audio: str | Path,
+    tolerance_seconds: float = 0.25,
+) -> None:
+    audio_duration = get_audio_duration_seconds(source_audio)
+    invalid = []
+
+    for clip in clips:
+        start = float(clip.get("start", 0))
+        end = float(clip.get("end", start))
+
+        if start >= audio_duration - tolerance_seconds:
+            invalid.append(
+                f"{clip.get('id')}. {clip.get('title')} starts at {format_timestamp(start)}, "
+                f"but audio ends at {format_timestamp(audio_duration)}"
+            )
+            continue
+
+        if end > audio_duration + tolerance_seconds:
+            invalid.append(
+                f"{clip.get('id')}. {clip.get('title')} ends at {format_timestamp(end)}, "
+                f"but audio ends at {format_timestamp(audio_duration)}"
+            )
+
+    if invalid:
+        details = "\n".join(f"- {item}" for item in invalid)
+        raise ValueError(
+            "Selected clip range(s) exceed the source audio duration. "
+            "Use a clip table that matches this exact homily audio, or select only valid rows.\n"
+            f"{details}"
+        )
 
 
 def list_background_audio_files(bg_audio_dir: str | Path) -> List[Path]:
@@ -884,10 +1078,168 @@ def mix_background_music(
     return bg_path
 
 
+def resolve_timed_transcript_path(paths: Dict[str, Path]) -> Optional[Path]:
+    video_clips_folder = paths["video_clips_folder"]
+    homily_folder = video_clips_folder.parent
+
+    candidates = [
+        homily_folder / "working" / "video_script.json",
+        homily_folder / "working" / "homily.json",
+        homily_folder / "video_script.json",
+        homily_folder / "homily.json",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def load_timed_words(paths: Dict[str, Path]) -> List[Dict[str, Any]]:
+    transcript_path = resolve_timed_transcript_path(paths)
+
+    if not transcript_path:
+        return []
+
+    try:
+        data = load_json(transcript_path)
+    except Exception:
+        return []
+
+    words: List[Dict[str, Any]] = []
+
+    for segment in data.get("homily_segments") or data.get("segments") or []:
+        segment_start = float(segment.get("start", 0.0) or 0.0)
+
+        for raw_word in segment.get("words") or []:
+            text = clean_text(raw_word.get("word", ""))
+
+            if not text:
+                continue
+
+            try:
+                start = float(raw_word.get("start"))
+                end = float(raw_word.get("end"))
+            except (TypeError, ValueError):
+                continue
+
+            # Some transcribers store word offsets relative to the segment.
+            if start < segment_start - 1.0 and segment_start > 0:
+                start += segment_start
+                end += segment_start
+
+            if end <= start:
+                continue
+
+            words.append(
+                {
+                    "word": text,
+                    "start": round(start, 3),
+                    "end": round(end, 3),
+                }
+            )
+
+    words.sort(key=lambda item: (item["start"], item["end"]))
+    return words
+
+
+def words_for_clip(words: List[Dict[str, Any]], clip: Dict[str, Any]) -> List[Dict[str, Any]]:
+    start = float(clip["start"])
+    end = float(clip["end"])
+
+    return [
+        word
+        for word in words
+        if float(word["end"]) > start and float(word["start"]) < end
+    ]
+
+
+def words_to_caption_text(words: List[Dict[str, Any]]) -> str:
+    return normalize_caption_text(" ".join(clean_text(word.get("word", "")) for word in words))
+
+
+def create_word_caption_groups(
+    clip: Dict[str, Any],
+    timed_words: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    clip_words = words_for_clip(timed_words, clip)
+
+    if not clip_words:
+        return []
+
+    clip_start = float(clip["start"])
+    clip_end = float(clip["end"])
+    groups: List[Dict[str, Any]] = []
+    current: List[Dict[str, Any]] = []
+
+    def flush() -> None:
+        if not current:
+            return
+
+        groups.append(
+            {
+                "start": round(max(clip_start, float(current[0]["start"])), 3),
+                "end": round(min(clip_end, float(current[-1]["end"])), 3),
+                "text": words_to_caption_text(current),
+            }
+        )
+        current.clear()
+
+    for word in clip_words:
+        word_text = clean_text(word.get("word", ""))
+
+        if not word_text:
+            continue
+
+        previous = current[-1] if current else None
+        current_text = words_to_caption_text(current) if current else ""
+        next_text = normalize_caption_text(f"{current_text} {word_text}".strip())
+        gap = float(word["start"]) - float(previous["end"]) if previous else 0.0
+        current_duration = float(previous["end"]) - float(current[0]["start"]) if previous else 0.0
+        previous_ends_sentence = bool(previous and re.search(r"[.!?][\"')\]]?$", clean_text(previous["word"])))
+
+        should_flush = bool(
+            current
+            and (
+                len(current) >= CAPTION_MAX_WORDS
+                or len(next_text) > CAPTION_MAX_CHARS
+                or gap > 0.65
+                or (previous_ends_sentence and current_duration >= 0.8)
+            )
+        )
+
+        if should_flush:
+            flush()
+
+        current.append(word)
+
+    flush()
+
+    return [
+        group
+        for group in groups
+        if group.get("text") and float(group["end"]) > float(group["start"])
+    ]
+
+
+def create_caption_groups(
+    clip: Dict[str, Any],
+    timed_words: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    if timed_words:
+        groups = create_word_caption_groups(clip, timed_words)
+
+        if groups:
+            return groups
+
+    return create_basic_caption_groups(clip)
+
+
 def create_basic_caption_groups(clip: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Simple captions using source_text.
-    Later Codex can replace this with word-level captions.
+    Fallback only; word-level captions are preferred when transcript timings exist.
     """
 
     start = float(clip["start"])
@@ -928,8 +1280,12 @@ def create_basic_caption_groups(clip: Dict[str, Any]) -> List[Dict[str, Any]]:
     return groups
 
 
-def write_srt(clip: Dict[str, Any], output_path: Path) -> Path:
-    groups = clip.get("caption_groups") or create_basic_caption_groups(clip)
+def write_srt(
+    clip: Dict[str, Any],
+    output_path: Path,
+    timed_words: Optional[List[Dict[str, Any]]] = None,
+) -> Path:
+    groups = clip.get("caption_groups") or create_caption_groups(clip, timed_words)
 
     lines = []
     clip_start = float(clip["start"])
@@ -964,6 +1320,7 @@ def render_video_clip(
     clip: Dict[str, Any],
     source_audio: str | Path,
     paths: Dict[str, Path],
+    timed_words: Optional[List[Dict[str, Any]]] = None,
     bg_audio_files: Optional[List[Path]] = None,
     bg_music_gain_db: float = DEFAULT_BG_MUSIC_GAIN_DB,
     bg_music_fade_ms: int = DEFAULT_BG_MUSIC_FADE_MS,
@@ -984,6 +1341,7 @@ def render_video_clip(
         raise FileNotFoundError(f"Image missing for clip {clip.get('id')}: {image_path}")
 
     print(f"Rendering clip {clip.get('id')}: {clip.get('title')}")
+    duration = float(clip["end"]) - float(clip["start"])
 
     cut_audio_clip(
         source_audio=source_audio,
@@ -994,18 +1352,21 @@ def render_video_clip(
 
     bg_audio_path = None
 
-    if bg_audio_files:
+    if bg_audio_files and duration <= MAX_BG_MUSIC_SECONDS:
         bg_audio_path = mix_background_music(
             speech_path=audio_path,
             bg_audio_files=bg_audio_files,
             gain_db=bg_music_gain_db,
             fade_ms=bg_music_fade_ms,
         )
+    elif bg_audio_files:
+        print(
+            f"Skipping background music for clip {clip.get('id')} "
+            f"because duration is {duration:.2f}s."
+        )
 
-    clip["caption_groups"] = create_basic_caption_groups(clip)
-    write_srt(clip, captions_path)
-
-    duration = float(clip["end"]) - float(clip["start"])
+    clip["caption_groups"] = create_caption_groups(clip, timed_words)
+    write_srt(clip, captions_path, timed_words=timed_words)
 
     background = np.array(make_background(image_path))
     layers = [ImageClip(background, duration=duration)]
@@ -1138,6 +1499,7 @@ def run_step_04_render_with_images(
     force_render: bool = False,
     allow_ai_fallback: bool = True,
     max_workers: int = 3,
+    clip_ids: Optional[List[int]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Main Step #4 function.
@@ -1157,6 +1519,22 @@ def run_step_04_render_with_images(
     analysis = load_json(paths["shorts_analysis"])
     selected_clips = get_selected_clips(analysis)
 
+    if clip_ids:
+        wanted = {int(clip_id) for clip_id in clip_ids}
+        selected_clips = [clip for clip in selected_clips if int(clip.get("id", 0)) in wanted]
+        found = {int(clip.get("id", 0)) for clip in selected_clips}
+        missing = sorted(wanted - found)
+
+        if missing:
+            raise ValueError(f"Requested clip IDs are not selected in shorts_analysis.json: {missing}")
+
+        if not selected_clips:
+            raise ValueError("No selected clips match the requested --clip-id values.")
+
+    validate_clips_against_audio_duration(selected_clips, source_audio)
+
+    timed_words = load_timed_words(paths)
+
     image_meta_by_clip_id: Dict[int, Dict[str, Any]] = {}
 
     bg_audio_files = []
@@ -1172,6 +1550,7 @@ def run_step_04_render_with_images(
     print("-" * 80)
     print(f"Selected clips: {len(selected_clips)}")
     print(f"First clip: {first_clip.get('id')} - {first_clip.get('title')}")
+    print(f"Timed transcript words: {len(timed_words)}")
     print("-" * 80)
     print()
 
@@ -1200,6 +1579,7 @@ def run_step_04_render_with_images(
             clip=first_clip,
             source_audio=source_audio,
             paths=paths,
+            timed_words=timed_words,
             bg_audio_files=bg_audio_files,
             force=force_render,
         )
@@ -1229,6 +1609,7 @@ def run_step_04_render_with_images(
             clip=clip,
             source_audio=source_audio,
             paths=paths,
+            timed_words=timed_words,
             bg_audio_files=bg_audio_files,
             force=force_render,
         )
@@ -1293,8 +1674,21 @@ if __name__ == "__main__":
         default=3,
         help="Number of parallel image lookup/generation workers.",
     )
+    parser.add_argument(
+        "--clip-id",
+        action="append",
+        default=[],
+        help="Render only specific selected clip IDs. Accepts repeated values or comma lists, e.g. --clip-id 6 --clip-id 8,9.",
+    )
 
     args = parser.parse_args()
+
+    cli_clip_ids = []
+    for value in args.clip_id:
+        for piece in str(value).split(","):
+            piece = piece.strip()
+            if piece:
+                cli_clip_ids.append(int(piece))
 
     run_step_04_render_with_images(
         shorts_analysis_path=args.shorts_analysis,
@@ -1304,4 +1698,5 @@ if __name__ == "__main__":
         force_render=args.force_render,
         allow_ai_fallback=not args.no_ai_fallback,
         max_workers=args.max_workers,
+        clip_ids=cli_clip_ids or None,
     )

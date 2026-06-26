@@ -7,12 +7,15 @@ from io import BytesIO
 import requests
 from dotenv import load_dotenv
 from openai import BadRequestError, OpenAI
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
 
 MAX_THUMBNAIL_BYTES = 1_900_000
 THUMBNAIL_SIZE = (1280, 720)
 DEFAULT_IMAGE_MODEL = "gpt-image-1.5"
+THUMBNAIL_TEXT_COLOR = (255, 255, 255, 255)
+THUMBNAIL_TEXT_SHADOW = (0, 0, 0, 230)
+THUMBNAIL_ACCENT_COLOR = (206, 24, 32, 255)
 
 
 def build_thumbnail_prompt(title, idea=None):
@@ -100,7 +103,175 @@ def _center_crop_to_ratio(image, target_ratio):
     return image.crop((0, top, width, top + new_height))
 
 
-def save_as_valid_youtube_thumbnail(image_bytes, output_path, max_bytes=MAX_THUMBNAIL_BYTES):
+def find_font(bold=True, serif=True):
+    serif_candidates = [
+        "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+        "/Library/Fonts/Times New Roman Bold.ttf",
+        "/Library/Fonts/Times New Roman.ttf",
+        "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Georgia.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    ]
+    sans_candidates = [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    candidates = serif_candidates if serif else sans_candidates
+    if not bold:
+        candidates = [path for path in candidates if "Bold" not in path] + candidates
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    raise RuntimeError("Could not find a usable font for thumbnail text.")
+
+
+def load_font(size, bold=True, serif=True):
+    return ImageFont.truetype(find_font(bold=bold, serif=serif), size)
+
+
+def wrap_text(text, font, max_width):
+    words = str(text or "").strip().split()
+    lines = []
+    line = ""
+
+    for word in words:
+        trial = f"{line} {word}".strip()
+        bbox = font.getbbox(trial)
+        if bbox[2] - bbox[0] <= max_width:
+            line = trial
+            continue
+        if line:
+            lines.append(line)
+        line = word
+
+    if line:
+        lines.append(line)
+
+    return lines
+
+
+def text_size(font, text):
+    bbox = font.getbbox(text)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def wrap_text_strict(text, font, max_width):
+    lines = []
+
+    for word in str(text or "").strip().split():
+        if text_size(font, word)[0] <= max_width:
+            pending_words = [word]
+        else:
+            pending_words = []
+            chunk = ""
+            for char in word:
+                trial = chunk + char
+                if chunk and text_size(font, trial)[0] > max_width:
+                    pending_words.append(chunk)
+                    chunk = char
+                else:
+                    chunk = trial
+            if chunk:
+                pending_words.append(chunk)
+
+        for item in pending_words:
+            trial = f"{lines[-1]} {item}".strip() if lines else item
+            if lines and text_size(font, trial)[0] <= max_width:
+                lines[-1] = trial
+            else:
+                lines.append(item)
+
+    return lines
+
+
+def clean_thumbnail_text(text):
+    text = " ".join(str(text or "").split()).strip()
+    return text.upper()
+
+
+def apply_thumbnail_text_overlay(image, text):
+    text = clean_thumbnail_text(text)
+    if not text:
+        return image
+
+    image = image.convert("RGBA")
+    width, height = image.size
+
+    gradient = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw_gradient = ImageDraw.Draw(gradient)
+    gradient_top = int(height * 0.38)
+    gradient_height = height - gradient_top
+
+    for offset in range(gradient_height):
+        alpha = int(225 * ((offset + 1) / gradient_height))
+        y = gradient_top + offset
+        draw_gradient.line([(0, y), (width, y)], fill=(0, 0, 0, alpha))
+
+    image = Image.alpha_composite(image, gradient)
+    draw = ImageDraw.Draw(image)
+
+    safe_left = 72
+    safe_right = 72
+    safe_bottom = 58
+    max_width = width - safe_left - safe_right
+    max_lines = 2
+    font_size = 76
+    font = load_font(font_size, bold=True, serif=True)
+    lines = wrap_text_strict(text, font, max_width)
+
+    def metrics():
+        line_gap = int(font_size * 0.18)
+        widths = []
+        heights = []
+        for line_text in lines[:max_lines]:
+            line_width, line_height = text_size(font, line_text)
+            widths.append(line_width)
+            heights.append(line_height)
+        total_height = sum(heights) + line_gap * max(0, len(lines) - 1)
+        return total_height, widths, heights, line_gap
+
+    total_height, widths, heights, line_gap = metrics()
+    max_height = int(height * 0.31)
+
+    while (len(lines) > max_lines or total_height > max_height or any(w > max_width for w in widths)) and font_size > 34:
+        font_size -= 4
+        font = load_font(font_size, bold=True, serif=True)
+        lines = wrap_text_strict(text, font, max_width)
+        total_height, widths, heights, line_gap = metrics()
+
+    lines = lines[:max_lines]
+    total_height, widths, heights, line_gap = metrics()
+    y = height - safe_bottom - total_height
+    accent_y = max(gradient_top + 16, y - 22)
+    draw.rounded_rectangle(
+        [safe_left, accent_y, min(width - safe_right, safe_left + 168), accent_y + 8],
+        radius=4,
+        fill=THUMBNAIL_ACCENT_COLOR,
+    )
+
+    for line, line_width, line_height in zip(lines, widths, heights):
+        x = safe_left
+        draw.text((x + 4, y + 4), line, font=font, fill=THUMBNAIL_TEXT_SHADOW)
+        draw.text((x, y), line, font=font, fill=THUMBNAIL_TEXT_COLOR)
+        y += line_height + line_gap
+
+    return image.convert("RGB")
+
+
+def save_as_valid_youtube_thumbnail(
+    image_bytes,
+    output_path,
+    max_bytes=MAX_THUMBNAIL_BYTES,
+    overlay_text=None,
+):
     target_ratio = THUMBNAIL_SIZE[0] / THUMBNAIL_SIZE[1]
 
     try:
@@ -111,6 +282,7 @@ def save_as_valid_youtube_thumbnail(image_bytes, output_path, max_bytes=MAX_THUM
     image = ImageOps.exif_transpose(image).convert("RGB")
     image = _center_crop_to_ratio(image, target_ratio)
     image = image.resize(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+    image = apply_thumbnail_text_overlay(image, overlay_text)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -175,7 +347,7 @@ def generate_youtube_thumbnail(title, output_dir, idea=None, output_filename="th
     response = _generate_image_with_compatible_kwargs(client, image_kwargs)
 
     image_bytes = _image_bytes_from_response(response)
-    return save_as_valid_youtube_thumbnail(image_bytes, output_path)
+    return save_as_valid_youtube_thumbnail(image_bytes, output_path, overlay_text=title)
 
 
 def ensure_youtube_thumbnail(metadata, output_dir):

@@ -21,6 +21,42 @@ from shorts_fxn.step_04_render_with_images import (
     run_step_04_render_with_images,
 )
 
+from shorts_fxn.manual_clips import (
+    create_shorts_analysis_from_manual_table,
+)
+
+
+DEFAULT_BG_AUDIO_DIR = Path(__file__).resolve().parent / "bg_audio_files"
+
+
+def parse_clip_ids(values: list[str]) -> list[int]:
+    clip_ids = []
+
+    for value in values or []:
+        for piece in str(value).split(","):
+            piece = piece.strip()
+
+            if piece:
+                clip_ids.append(int(piece))
+
+    return clip_ids
+
+
+def prompt_for_manual_clips_if_needed(args: argparse.Namespace) -> None:
+    if args.manual_clips or args.no_manual_clips_prompt:
+        return
+
+    if args.step not in {"2", "all"}:
+        return
+
+    manual_clips = input(
+        "Optional manual Shorts table path (# | Start | End | Title). "
+        "Leave blank for automatic clip discovery: "
+    ).strip().strip('"').strip("'")
+
+    if manual_clips:
+        args.manual_clips = manual_clips
+
 
 def resolve_analysis_path(homily_result: dict) -> Path:
     paths = homily_result["paths"]
@@ -76,8 +112,18 @@ def run_step_1_load(args: argparse.Namespace) -> dict:
 
 def run_step_2_analyze(args: argparse.Namespace) -> dict:
     print()
-    print("STEP 2: Identifying usable Shorts")
+    if args.manual_clips:
+        print("STEP 2: Using manual Shorts table")
+    else:
+        print("STEP 2: Identifying usable Shorts")
     print("=" * 80)
+
+    if args.manual_clips:
+        return create_shorts_analysis_from_manual_table(
+            homily_folder=args.homily_folder,
+            manual_table_path=args.manual_clips,
+            force=True,
+        )
 
     analysis = identify_usable_shorts_from_folder(
         homily_folder=args.homily_folder,
@@ -122,11 +168,12 @@ def run_step_4_render(
     rendered_clips = run_step_04_render_with_images(
         shorts_analysis_path=analysis_path,
         source_audio=audio_path,
-        bg_audio_dir=args.bg_audio_dir,
+        bg_audio_dir=None if args.no_background_music else args.bg_audio_dir,
         force_images=args.force_images,
         force_render=args.force_render,
         allow_ai_fallback=not args.no_ai_fallback,
         max_workers=args.max_workers,
+        clip_ids=parse_clip_ids(args.clip_id) or None,
     )
 
     return rendered_clips
@@ -154,6 +201,24 @@ def parse_args() -> argparse.Namespace:
         "--select",
         default=None,
         help='Clip IDs to render, example: "1, 2-5, 7, 9-12". If omitted, you will be prompted.',
+    )
+
+    parser.add_argument(
+        "--manual-clips",
+        default=None,
+        help="Optional markdown/text table with columns: # | Start | End | Title. Uses this instead of AI clip discovery.",
+    )
+
+    parser.add_argument(
+        "--ask-manual-clips",
+        action="store_true",
+        help="Compatibility option. The workflow now prompts before Step #2 by default.",
+    )
+
+    parser.add_argument(
+        "--no-manual-clips-prompt",
+        action="store_true",
+        help="Do not prompt for a manual clips table before Step #2.",
     )
 
     parser.add_argument(
@@ -202,8 +267,14 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--bg-audio-dir",
-        default=None,
-        help="Optional folder containing background music files.",
+        default=str(DEFAULT_BG_AUDIO_DIR),
+        help="Folder containing background music files. Music is skipped automatically for clips over 55 seconds.",
+    )
+
+    parser.add_argument(
+        "--no-background-music",
+        action="store_true",
+        help="Disable background music for every Short.",
     )
 
     parser.add_argument(
@@ -211,6 +282,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Parallel image lookup/generation workers for Step #4.",
+    )
+
+    parser.add_argument(
+        "--clip-id",
+        action="append",
+        default=[],
+        help="Step #4 only: render/refresh specific selected clip IDs, e.g. --clip-id 6 or --clip-id 6,8.",
     )
 
     parser.add_argument(
@@ -256,6 +334,8 @@ def main() -> None:
 
     analysis_path = resolve_analysis_path(homily_result)
 
+    prompt_for_manual_clips_if_needed(args)
+
     if args.step in {"2", "all"}:
         run_step_2_analyze(args)
 
@@ -268,16 +348,24 @@ def main() -> None:
                 f"shorts_analysis.json does not exist yet: {analysis_path}. Run Step #2 first."
             )
 
-        run_step_3_select(args, analysis_path)
+        if args.manual_clips and not args.select:
+            print()
+            print("STEP 3: Manual clips are already selected")
+            print("=" * 80)
+        else:
+            run_step_3_select(args, analysis_path)
 
         if args.step == "3":
             return
 
     if args.step in {"4", "all"}:
         if not analysis_path.exists():
-            raise FileNotFoundError(
-                f"shorts_analysis.json does not exist yet: {analysis_path}. Run Step #2 first."
-            )
+            if args.manual_clips:
+                run_step_2_analyze(args)
+            else:
+                raise FileNotFoundError(
+                    f"shorts_analysis.json does not exist yet: {analysis_path}. Run Step #2 first."
+                )
 
         audio_path = resolve_audio_path(homily_result, args.audio)
 
