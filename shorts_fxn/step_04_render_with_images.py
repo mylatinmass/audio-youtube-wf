@@ -1,10 +1,12 @@
 import concurrent.futures
+import csv
 import hashlib
 import json
 import os
 import random
 import re
 import shutil
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -44,6 +46,9 @@ MAX_BG_MUSIC_SECONDS = 55.0
 
 REQUEST_TIMEOUT = 18
 MIN_PUBLIC_DOMAIN_SCORE = 7.0
+NGA_OBJECTS_CSV_URL = "https://raw.githubusercontent.com/NationalGalleryOfArt/opendata/main/data/objects.csv"
+NGA_PUBLISHED_IMAGES_CSV_URL = "https://raw.githubusercontent.com/NationalGalleryOfArt/opendata/main/data/published_images.csv"
+NGA_INDEX_VERSION = 1
 
 PAINTING_TERMS = {
     "painting",
@@ -139,6 +144,89 @@ def ensure_folder(path: str | Path) -> Path:
     return path
 
 
+def artwork_identity(candidate: Optional[Dict[str, Any]]) -> str:
+    if not candidate:
+        return ""
+
+    source = clean_text(candidate.get("source", "")).lower()
+
+    for field in ["image_id", "object_id", "source_url", "image_url"]:
+        value = clean_text(candidate.get(field, ""))
+
+        if value:
+            return f"{source}:{field}:{value}"
+
+    return ""
+
+
+def reserve_artwork_key(
+    candidate: Dict[str, Any],
+    used_artwork_keys: Optional[set[str]],
+    lock: Optional[threading.Lock],
+) -> Tuple[bool, str]:
+    key = artwork_identity(candidate)
+
+    if not key or used_artwork_keys is None:
+        return True, key
+
+    if lock:
+        with lock:
+            if key in used_artwork_keys:
+                return False, key
+            used_artwork_keys.add(key)
+            return True, key
+
+    if key in used_artwork_keys:
+        return False, key
+
+    used_artwork_keys.add(key)
+    return True, key
+
+
+def release_artwork_key(
+    key: str,
+    used_artwork_keys: Optional[set[str]],
+    lock: Optional[threading.Lock],
+) -> None:
+    if not key or used_artwork_keys is None:
+        return
+
+    if lock:
+        with lock:
+            used_artwork_keys.discard(key)
+            return
+
+    used_artwork_keys.discard(key)
+
+
+def reserve_existing_artwork_key(
+    key: str,
+    used_artwork_keys: Optional[set[str]],
+    lock: Optional[threading.Lock],
+) -> bool:
+    key = clean_text(key)
+
+    if not key or used_artwork_keys is None:
+        return True
+
+    if lock:
+        with lock:
+            if key in used_artwork_keys:
+                return False
+            used_artwork_keys.add(key)
+            return True
+
+    if key in used_artwork_keys:
+        return False
+
+    used_artwork_keys.add(key)
+    return True
+
+
+def existing_artwork_key_from_meta(meta: Dict[str, Any]) -> str:
+    return clean_text(meta.get("artwork_key", "")) or artwork_identity(meta.get("artwork"))
+
+
 def format_timestamp(seconds: float, srt: bool = False) -> str:
     seconds = max(0.0, float(seconds or 0.0))
     whole = int(seconds)
@@ -208,6 +296,34 @@ def get_clip_paths(clip: Dict[str, Any], paths: Dict[str, Path]) -> Dict[str, Pa
         "captions": paths["captions_dir"] / f"{clip_id}.srt",
         "image_meta": paths["images_dir"] / f"{clip_id}-{slug}.image.json",
     }
+
+
+def load_existing_artwork_keys_for_other_clips(
+    paths: Dict[str, Path],
+    selected_clip_ids: set[int],
+) -> set[str]:
+    keys: set[str] = set()
+
+    for meta_path in paths["images_dir"].glob("*.image.json"):
+        try:
+            meta = load_json(meta_path)
+        except Exception:
+            continue
+
+        try:
+            clip_id = int(meta.get("clip_id", 0))
+        except Exception:
+            clip_id = 0
+
+        if clip_id in selected_clip_ids:
+            continue
+
+        key = existing_artwork_key_from_meta(meta)
+
+        if key:
+            keys.add(key)
+
+    return keys
 
 
 def build_search_terms(clip: Dict[str, Any]) -> List[str]:
@@ -408,6 +524,198 @@ def requests_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Opti
         return None
 
 
+def download_file(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.with_suffix(destination.suffix + ".tmp")
+
+    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT) as response:
+        response.raise_for_status()
+
+        with open(temp_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+    temp_path.replace(destination)
+
+
+def nga_cache_dir() -> Path:
+    configured = os.getenv("NGA_OPENDATA_CACHE_DIR", "").strip()
+
+    if configured:
+        return ensure_folder(configured)
+
+    return ensure_folder(Path.home() / "Library" / "Caches" / "homily-shorts" / "nga-opendata")
+
+
+def ensure_nga_cache_file(filename: str, url: str) -> Path:
+    path = nga_cache_dir() / filename
+
+    if path.exists() and path.stat().st_size > 0:
+        return path
+
+    print(f"Downloading NGA Open Data cache: {filename}")
+    download_file(url, path)
+    return path
+
+
+def nga_iiif_image_url(iiif_url: str) -> str:
+    iiif_url = clean_text(iiif_url).rstrip("/")
+
+    if not iiif_url:
+        return ""
+
+    return f"{iiif_url}/full/1600,/0/default.jpg"
+
+
+def text_tokens(*values: str) -> List[str]:
+    stopwords = {
+        "about",
+        "above",
+        "after",
+        "again",
+        "against",
+        "among",
+        "because",
+        "before",
+        "being",
+        "between",
+        "catholic",
+        "christian",
+        "clip",
+        "from",
+        "into",
+        "painting",
+        "sacred",
+        "short",
+        "that",
+        "the",
+        "their",
+        "there",
+        "these",
+        "this",
+        "through",
+        "with",
+        "would",
+    }
+    tokens = []
+
+    for value in values:
+        for token in re.findall(r"[a-zA-Z]+", clean_text(value).lower()):
+            if len(token) >= 4 and token not in stopwords:
+                tokens.append(token)
+
+    return list(dict.fromkeys(tokens))
+
+
+def build_nga_index() -> List[Dict[str, Any]]:
+    objects_path = ensure_nga_cache_file("objects.csv", NGA_OBJECTS_CSV_URL)
+    images_path = ensure_nga_cache_file("published_images.csv", NGA_PUBLISHED_IMAGES_CSV_URL)
+    index_path = nga_cache_dir() / "nga_painting_index.json"
+
+    newest_source_mtime = max(objects_path.stat().st_mtime, images_path.stat().st_mtime)
+
+    if index_path.exists() and index_path.stat().st_mtime >= newest_source_mtime:
+        try:
+            cached = load_json(index_path)
+
+            if cached.get("version") == NGA_INDEX_VERSION:
+                return cached.get("items", [])
+        except Exception:
+            pass
+
+    print("Building NGA artwork search index...")
+
+    primary_images: Dict[str, Dict[str, Any]] = {}
+
+    with open(images_path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            if clean_text(row.get("openaccess", "")) != "1":
+                continue
+
+            if clean_text(row.get("viewtype", "")).lower() != "primary":
+                continue
+
+            object_id = clean_text(row.get("depictstmsobjectid", ""))
+            image_url = nga_iiif_image_url(row.get("iiifurl", ""))
+
+            if not object_id or not image_url:
+                continue
+
+            existing = primary_images.get(object_id)
+            sequence = clean_text(row.get("sequence", ""))
+
+            if existing and sequence and clean_text(existing.get("sequence", "")) <= sequence:
+                continue
+
+            primary_images[object_id] = {
+                "image_id": clean_text(row.get("uuid", "")),
+                "image_url": image_url,
+                "thumbnail_url": clean_text(row.get("iiifthumburl", "")),
+                "sequence": sequence,
+                "assistive_text": clean_text(row.get("assistivetext", "")),
+            }
+
+    items: List[Dict[str, Any]] = []
+
+    with open(objects_path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            object_id = clean_text(row.get("objectid", ""))
+            image = primary_images.get(object_id)
+
+            if not image:
+                continue
+
+            candidate = {
+                "source": "National Gallery of Art",
+                "object_id": object_id,
+                "image_id": image.get("image_id", ""),
+                "title": clean_text(row.get("title", "Untitled")),
+                "artist": clean_text(row.get("attribution", "Unknown artist")),
+                "date": clean_text(row.get("displaydate", "")),
+                "medium": clean_text(row.get("medium", "")),
+                "classification": clean_text(row.get("classification", "")),
+                "object_type": clean_text(row.get("subclassification", "")),
+                "department": clean_text(row.get("departmentabbr", "")),
+                "source_url": f"https://www.nga.gov/collection/art-object-page.{object_id}.html",
+                "image_url": image.get("image_url", ""),
+                "thumbnail_url": image.get("thumbnail_url", ""),
+                "license": "National Gallery of Art Open Access image / CC0 collection data",
+                "public_domain": True,
+                "assistive_text": image.get("assistive_text", ""),
+            }
+
+            if not candidate_is_painting(candidate):
+                continue
+
+            candidate["search_blob"] = clean_text(
+                " ".join(
+                    [
+                        candidate["title"],
+                        candidate["artist"],
+                        candidate["date"],
+                        candidate["medium"],
+                        candidate["classification"],
+                        candidate["object_type"],
+                        candidate["assistive_text"],
+                    ]
+                )
+            ).lower()
+            items.append(candidate)
+
+    save_json(
+        index_path,
+        {
+            "version": NGA_INDEX_VERSION,
+            "created_at": time.time(),
+            "source": "NationalGalleryOfArt/opendata",
+            "items": items,
+        },
+    )
+
+    return items
+
+
 def search_met(term: str, clip: Dict[str, Any], max_results: int = 5) -> List[Dict[str, Any]]:
     results = []
 
@@ -568,31 +876,71 @@ def search_rijksmuseum(term: str, clip: Dict[str, Any], max_results: int = 8) ->
 
 
 def search_nga(term: str, clip: Dict[str, Any], max_results: int = 8) -> List[Dict[str, Any]]:
-    """
-    Placeholder hook for National Gallery of Art.
+    try:
+        index = build_nga_index()
+    except Exception as exc:
+        print(f"NGA Open Data search unavailable: {exc}")
+        return []
 
-    Recommended Codex task:
-    - Add NGA Open Data CSV / local dataset connector here.
-    - Return the same candidate shape as the other sources.
+    tokens = text_tokens(
+        term,
+        clip.get("title", ""),
+        clip.get("main_idea", ""),
+        clip.get("image_idea", ""),
+        clip.get("power_quote", ""),
+    )
+    term_tokens = set(text_tokens(term))
+    results = []
 
-    Keeping this as a hook prevents the workflow from breaking.
-    """
+    for item in index:
+        blob = clean_text(item.get("search_blob", "")).lower()
 
-    return []
+        if tokens and not any(token in blob for token in tokens):
+            continue
+
+        candidate = dict(item)
+        title = clean_text(candidate.get("title", "")).lower()
+        token_hits = sum(1 for token in tokens if token in blob)
+        title_hits = sum(1 for token in term_tokens if token in title)
+
+        candidate["search_term"] = term
+        candidate["score"] = round(
+            score_artwork(candidate, clip, term)
+            + min(4.0, token_hits * 0.45)
+            + min(2.5, title_hits * 0.75),
+            2,
+        )
+        candidate.pop("search_blob", None)
+        results.append(candidate)
+
+    results.sort(key=lambda item: item.get("score", 0), reverse=True)
+    return results[:max_results]
 
 
-def search_public_domain_art_for_clip(clip: Dict[str, Any]) -> Dict[str, Any]:
+def search_public_domain_art_for_clip(
+    clip: Dict[str, Any],
+    used_artwork_keys: Optional[set[str]] = None,
+) -> Dict[str, Any]:
     all_candidates = []
     search_terms = build_search_terms(clip)
 
     for term in search_terms:
-        all_candidates.extend(search_met(term, clip))
         all_candidates.extend(search_nga(term, clip))
+        all_candidates.extend(search_met(term, clip))
         all_candidates.extend(search_artic(term, clip))
         all_candidates.extend(search_rijksmuseum(term, clip))
 
         all_candidates = [c for c in all_candidates if candidate_is_painting(c)]
-        strong_candidates = [c for c in all_candidates if c.get("score", 0) >= MIN_PUBLIC_DOMAIN_SCORE]
+        if used_artwork_keys is not None:
+            all_candidates = [
+                c
+                for c in all_candidates
+                if not artwork_identity(c) or artwork_identity(c) not in used_artwork_keys
+            ]
+
+        strong_candidates = [
+            c for c in all_candidates if c.get("score", 0) >= MIN_PUBLIC_DOMAIN_SCORE
+        ]
 
         if strong_candidates:
             break
@@ -815,22 +1163,53 @@ def ensure_image_for_clip(
     paths: Dict[str, Path],
     force_image: bool = False,
     allow_ai_fallback: bool = True,
+    used_artwork_keys: Optional[set[str]] = None,
+    artwork_lock: Optional[threading.Lock] = None,
 ) -> Dict[str, Any]:
     clip_paths = get_clip_paths(clip, paths)
     image_path = clip_paths["image"]
     image_meta_path = clip_paths["image_meta"]
 
     if image_path.exists() and image_meta_path.exists() and not force_image:
-        return load_json(image_meta_path)
+        existing_meta = load_json(image_meta_path)
+        existing_key = existing_artwork_key_from_meta(existing_meta)
+        reserved = reserve_existing_artwork_key(
+            existing_key,
+            used_artwork_keys,
+            artwork_lock,
+        )
+
+        if reserved:
+            if existing_key and not existing_meta.get("artwork_key"):
+                existing_meta["artwork_key"] = existing_key
+                save_json(image_meta_path, existing_meta)
+
+            return existing_meta
+
+        print(
+            f"Existing image for clip {clip.get('id')} duplicates another selected clip; finding a new one."
+        )
 
     print(f"Finding image for clip {clip.get('id')}: {clip.get('title')}")
 
-    image_search_result = search_public_domain_art_for_clip(clip)
-    best = image_search_result.get("best_candidate")
+    image_search_result = search_public_domain_art_for_clip(
+        clip,
+        used_artwork_keys=used_artwork_keys,
+    )
+    candidates = [
+        candidate
+        for candidate in image_search_result.get("candidates", [])
+        if candidate.get("score", 0) >= MIN_PUBLIC_DOMAIN_SCORE
+    ]
 
-    if best and best.get("score", 0) >= MIN_PUBLIC_DOMAIN_SCORE:
+    for candidate in candidates:
+        reserved, artwork_key = reserve_artwork_key(candidate, used_artwork_keys, artwork_lock)
+
+        if not reserved:
+            continue
+
         try:
-            image = download_image(best["image_url"])
+            image = download_image(candidate["image_url"])
             save_cropped_image(image, image_path)
 
             meta = {
@@ -838,7 +1217,8 @@ def ensure_image_for_clip(
                 "clip_title": clip.get("title"),
                 "image_path": str(image_path),
                 "image_source_type": "public_domain",
-                "artwork": best,
+                "artwork": candidate,
+                "artwork_key": artwork_key,
                 "all_candidates": image_search_result.get("candidates", []),
                 "created_at": time.time(),
             }
@@ -848,6 +1228,7 @@ def ensure_image_for_clip(
 
         except Exception as exc:
             print(f"Public-domain image failed for clip {clip.get('id')}: {exc}")
+            release_artwork_key(artwork_key, used_artwork_keys, artwork_lock)
 
     if allow_ai_fallback:
         generated = generate_ai_image_for_clip(clip, image_path)
@@ -859,6 +1240,7 @@ def ensure_image_for_clip(
                 "image_path": str(generated),
                 "image_source_type": "ai_generated",
                 "artwork": None,
+                "artwork_key": "",
                 "all_candidates": image_search_result.get("candidates", []),
                 "created_at": time.time(),
             }
@@ -874,6 +1256,7 @@ def ensure_image_for_clip(
         "image_path": str(image_path),
         "image_source_type": "placeholder",
         "artwork": None,
+        "artwork_key": "",
         "all_candidates": image_search_result.get("candidates", []),
         "created_at": time.time(),
     }
@@ -1479,6 +1862,7 @@ def write_manifest_and_metadata(
                 "source_url": (artwork or {}).get("source_url", ""),
                 "license": (artwork or {}).get("license", ""),
                 "image_path": image_meta.get("image_path", ""),
+                "artwork_key": image_meta.get("artwork_key", ""),
             }
         )
 
@@ -1536,6 +1920,9 @@ def run_step_04_render_with_images(
     timed_words = load_timed_words(paths)
 
     image_meta_by_clip_id: Dict[int, Dict[str, Any]] = {}
+    selected_clip_ids = {int(clip.get("id", 0)) for clip in selected_clips}
+    used_artwork_keys = load_existing_artwork_keys_for_other_clips(paths, selected_clip_ids)
+    artwork_lock = threading.Lock()
 
     bg_audio_files = []
 
@@ -1559,6 +1946,8 @@ def run_step_04_render_with_images(
         paths=paths,
         force_image=force_images,
         allow_ai_fallback=allow_ai_fallback,
+        used_artwork_keys=used_artwork_keys,
+        artwork_lock=artwork_lock,
     )
 
     image_meta_by_clip_id[int(first_clip["id"])] = first_meta
@@ -1571,6 +1960,8 @@ def run_step_04_render_with_images(
                 paths,
                 force_images,
                 allow_ai_fallback,
+                used_artwork_keys,
+                artwork_lock,
             ): clip
             for clip in remaining_clips
         }

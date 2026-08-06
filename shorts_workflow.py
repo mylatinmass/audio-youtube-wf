@@ -231,7 +231,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-clips",
         type=int,
-        default=12,
+        default=16,
         help="Maximum number of Shorts to identify.",
     )
 

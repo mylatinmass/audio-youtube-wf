@@ -186,20 +186,22 @@ def prompt_user_for_selection(analysis: Dict[str, Any]) -> str:
 
     print()
     print("Available Shorts")
-    print("-" * 100)
-    print(f"{'ID':<4} {'Time':<13} {'Length':<8} {'Strength':<10} Title")
-    print("-" * 100)
+    print("-" * 140)
+    print(f"{'ID':<4} {'Time':<13} {'Length':<8} {'Strength':<10} {'Title':<34} Main Idea")
+    print("-" * 140)
 
     for clip in clips:
+        main_idea = str(clip.get("main_idea") or clip.get("why_it_works") or "").strip()
         print(
             f"{clip.get('id', ''):<4} "
             f"{clip.get('time', ''):<13} "
             f"{clip.get('length', ''):<8} "
             f"{clip.get('strength', ''):<10} "
-            f"{clip.get('title', '')}"
+            f"{str(clip.get('title', ''))[:33]:<34} "
+            f"{main_idea[:72]}"
         )
 
-    print("-" * 100)
+    print("-" * 140)
     print()
     print("Enter IDs like:")
     print("1, 2-5, 7, 9-12")
