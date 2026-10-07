@@ -8,10 +8,11 @@ import re
 import shutil
 import threading
 import time
+from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote_plus
+from urllib.parse import urljoin, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -22,19 +23,18 @@ import numpy as np
 
 
 CANVAS_SIZE = (1080, 1920)
-IMAGE_SIZE = (1080, 1350)
-IMAGE_RATIO = 4 / 5
-IMAGE_TOP = 570
-TEXT_BOX_BOTTOM = 570
-GRADIENT_TOP = 570
-GRADIENT_BOTTOM = 1020
+IMAGE_SIZE = CANVAS_SIZE
+IMAGE_RATIO = CANVAS_SIZE[0] / CANVAS_SIZE[1]
+IMAGE_TOP = 0
+GRADIENT_TOP = 1280
+GRADIENT_BOTTOM = CANVAS_SIZE[1]
+GRADIENT_MAX_ALPHA = 165
 FPS = 30
-TITLE_SECONDS = 2.4
 
 TEXT_SAFE_LEFT = 74
 TEXT_SAFE_RIGHT = 74
-TEXT_SAFE_TOP = 20
-TEXT_SAFE_BOTTOM = CANVAS_SIZE[1] - TEXT_BOX_BOTTOM
+TEXT_SAFE_TOP = 760
+TEXT_SAFE_BOTTOM = 760
 CAPTION_MAX_LINES = 2
 CAPTION_MAX_WORDS = 7
 CAPTION_MAX_CHARS = 54
@@ -48,7 +48,10 @@ REQUEST_TIMEOUT = 18
 MIN_PUBLIC_DOMAIN_SCORE = 7.0
 NGA_OBJECTS_CSV_URL = "https://raw.githubusercontent.com/NationalGalleryOfArt/opendata/main/data/objects.csv"
 NGA_PUBLISHED_IMAGES_CSV_URL = "https://raw.githubusercontent.com/NationalGalleryOfArt/opendata/main/data/published_images.csv"
-NGA_INDEX_VERSION = 1
+NGA_INDEX_VERSION = 2
+CATHOLIC_TRADITION_GALLERY_URL = "https://www.catholictradition.org/Galleries/gallery-one.htm"
+CATHOLIC_TRADITION_INDEX_VERSION = 1
+CATHOLIC_TRADITION_MAX_GALLERY_PAGES = 70
 
 PAINTING_TERMS = {
     "painting",
@@ -65,6 +68,56 @@ PAINTING_TERMS = {
     "illumination",
     "gouache",
     "pastel",
+}
+
+SACRED_CATHOLIC_TERMS = {
+    "adoration",
+    "angel",
+    "annunciation",
+    "apostle",
+    "baptism",
+    "blessed virgin",
+    "calvary",
+    "christ",
+    "christ child",
+    "christian",
+    "church",
+    "coronation of the virgin",
+    "cross",
+    "crucifixion",
+    "deposition",
+    "ecce homo",
+    "eucharist",
+    "evangelist",
+    "flight into egypt",
+    "holy family",
+    "holy spirit",
+    "infant jesus",
+    "jesus",
+    "john the baptist",
+    "last judgment",
+    "last supper",
+    "madonna",
+    "magi",
+    "martyr",
+    "mass",
+    "obedience",
+    "nativity",
+    "passion",
+    "penance",
+    "peter",
+    "pentecost",
+    "pieta",
+    "prayer",
+    "sacrament",
+    "sacraments",
+    "resurrection",
+    "saint",
+    "souls",
+    "st.",
+    "st ",
+    "trinity",
+    "virgin",
 }
 
 NON_PAINTING_TERMS = {
@@ -106,6 +159,47 @@ NON_PAINTING_TERMS = {
     "textile",
     "vessel",
     "woodcut",
+}
+
+SECULAR_ARTWORK_TERMS = {
+    "abstract",
+    "advertisement",
+    "allegory",
+    "battle",
+    "cityscape",
+    "costume",
+    "fashion",
+    "landscape",
+    "mythological",
+    "nude",
+    "portrait",
+    "poster",
+    "seascape",
+    "still life",
+}
+
+CATHOLIC_TRADITION_SKIP_TERMS = {
+    "aspirations",
+    "back",
+    "banner",
+    "bar",
+    "desktop",
+    "directory",
+    "divider",
+    "download",
+    "email",
+    "forward",
+    "gem",
+    "home",
+    "icon",
+    "quote",
+    "scenic",
+    "sculpture",
+    "sources",
+    "stained glass",
+    "text",
+    "wallpaper",
+    "window",
 }
 
 TRADITIONAL_CATHOLIC_IMAGE_GUARDRAIL = (
@@ -336,10 +430,11 @@ def build_search_terms(clip: Dict[str, Any]) -> List[str]:
             terms.append(value)
 
     title = clean_text(clip.get("title", ""))
+    main_idea = clean_text(clip.get("main_idea", ""))
     image_idea = clean_text(clip.get("image_idea", ""))
     power_quote = clean_text(clip.get("power_quote", ""))
 
-    for value in [title, image_idea, power_quote]:
+    for value in [title, main_idea, image_idea, power_quote]:
         if value:
             terms.append(value)
             terms.append(f"{value} painting")
@@ -401,6 +496,21 @@ def candidate_media_text(candidate: Dict[str, Any]) -> str:
     return " ".join(clean_text(candidate.get(field, "")) for field in fields).lower()
 
 
+def candidate_subject_text(candidate: Dict[str, Any]) -> str:
+    fields = [
+        "title",
+        "artist",
+        "date",
+        "medium",
+        "classification",
+        "object_type",
+        "department",
+        "artwork_type",
+        "assistive_text",
+    ]
+    return " ".join(clean_text(candidate.get(field, "")) for field in fields).lower()
+
+
 def candidate_is_painting(candidate: Dict[str, Any]) -> bool:
     text = candidate_media_text(candidate)
 
@@ -413,8 +523,32 @@ def candidate_is_painting(candidate: Dict[str, Any]) -> bool:
     return any(term in text for term in PAINTING_TERMS)
 
 
-def score_artwork(candidate: Dict[str, Any], clip: Dict[str, Any], search_term: str) -> float:
+def candidate_is_catholic_painting(candidate: Dict[str, Any]) -> bool:
     if not candidate_is_painting(candidate):
+        return False
+
+    subject_text = candidate_subject_text(candidate)
+
+    if not subject_text:
+        return False
+
+    has_sacred_subject = any(term in subject_text for term in SACRED_CATHOLIC_TERMS)
+
+    if not has_sacred_subject:
+        return False
+
+    if any(term in subject_text for term in SECULAR_ARTWORK_TERMS):
+        title = clean_text(candidate.get("title", "")).lower()
+        sacred_in_title = any(term in title for term in SACRED_CATHOLIC_TERMS)
+
+        if not sacred_in_title:
+            return False
+
+    return True
+
+
+def score_artwork(candidate: Dict[str, Any], clip: Dict[str, Any], search_term: str) -> float:
+    if not candidate_is_catholic_painting(candidate):
         return -100.0
 
     title = clean_text(candidate.get("title", "")).lower()
@@ -463,7 +597,7 @@ def score_artwork(candidate: Dict[str, Any], clip: Dict[str, Any], search_term: 
     if candidate.get("image_url"):
         score += 2.0
 
-    if candidate.get("public_domain"):
+    if candidate.get("public_domain") or candidate.get("approved_for_use"):
         score += 3.0
 
     score += 3.0
@@ -512,6 +646,14 @@ def score_artwork(candidate: Dict[str, Any], clip: Dict[str, Any], search_term: 
         if word in title:
             score -= 2.0
 
+    subject_text = candidate_subject_text(candidate)
+
+    if any(term in subject_text for term in SACRED_CATHOLIC_TERMS):
+        score += 4.0
+
+    if any(term in title for term in SACRED_CATHOLIC_TERMS):
+        score += 3.0
+
     return round(score, 2)
 
 
@@ -520,6 +662,16 @@ def requests_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Opti
         response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         return response.json()
+    except Exception:
+        return None
+
+
+def requests_get_text(url: str) -> Optional[str]:
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        response.encoding = response.encoding or "utf-8"
+        return response.text
     except Exception:
         return None
 
@@ -537,6 +689,199 @@ def download_file(url: str, destination: Path) -> None:
                     f.write(chunk)
 
     temp_path.replace(destination)
+
+
+def catholic_tradition_cache_dir() -> Path:
+    configured = os.getenv("CATHOLIC_TRADITION_CACHE_DIR", "").strip()
+
+    if configured:
+        return ensure_folder(configured)
+
+    return ensure_folder(Path.home() / "Library" / "Caches" / "homily-shorts" / "catholic-tradition")
+
+
+def is_catholic_tradition_url(url: str) -> bool:
+    return urlparse(url).netloc.lower().endswith("catholictradition.org")
+
+
+def is_html_page_url(url: str) -> bool:
+    return urlparse(url).path.lower().endswith((".htm", ".html"))
+
+
+def is_image_file_url(url: str) -> bool:
+    return urlparse(url).path.lower().endswith((".jpg", ".jpeg", ".png"))
+
+
+def clean_gallery_label(value: str, fallback: str = "Traditional Catholic Image") -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip(" -:\t\r\n")
+    value = re.sub(r"^(image|download)\s*:\s*", "", value, flags=re.IGNORECASE).strip()
+    return value or fallback
+
+
+def should_skip_catholic_tradition_item(title: str, gallery_title: str = "") -> bool:
+    text = f"{title} {gallery_title}".lower()
+
+    if not text.strip():
+        return True
+
+    return any(term in text for term in CATHOLIC_TRADITION_SKIP_TERMS)
+
+
+class CatholicTraditionLinkParser(HTMLParser):
+    def __init__(self, base_url: str):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.links: List[Dict[str, str]] = []
+        self._current: Optional[Dict[str, str]] = None
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        attr_map = {name.lower(): value or "" for name, value in attrs}
+
+        if tag.lower() == "a" and attr_map.get("href"):
+            self._current = {
+                "url": urljoin(self.base_url, attr_map["href"]),
+                "text": "",
+            }
+            return
+
+        if tag.lower() == "img":
+            src = attr_map.get("src", "")
+
+            if src:
+                self.links.append(
+                    {
+                        "url": urljoin(self.base_url, src),
+                        "text": attr_map.get("alt", ""),
+                    }
+                )
+
+            if self._current is not None and attr_map.get("alt"):
+                self._current["text"] = clean_text(
+                    f"{self._current.get('text', '')} {attr_map.get('alt', '')}"
+                )
+
+    def handle_data(self, data: str) -> None:
+        if self._current is not None:
+            self._current["text"] = clean_text(f"{self._current.get('text', '')} {data}")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self._current is not None:
+            self.links.append(self._current)
+            self._current = None
+
+
+def parse_catholic_tradition_links(url: str, html: str) -> List[Dict[str, str]]:
+    parser = CatholicTraditionLinkParser(url)
+    parser.feed(html or "")
+    return parser.links
+
+
+def build_catholic_tradition_index() -> List[Dict[str, Any]]:
+    index_path = catholic_tradition_cache_dir() / "catholic_tradition_images.json"
+
+    if index_path.exists():
+        try:
+            cached = load_json(index_path)
+
+            if cached.get("version") == CATHOLIC_TRADITION_INDEX_VERSION:
+                return cached.get("items", [])
+        except Exception:
+            pass
+
+    print("Building Catholic Tradition image index...")
+
+    root_html = requests_get_text(CATHOLIC_TRADITION_GALLERY_URL)
+
+    if not root_html:
+        return []
+
+    root_links = parse_catholic_tradition_links(CATHOLIC_TRADITION_GALLERY_URL, root_html)
+    gallery_pages: List[Dict[str, str]] = []
+    seen_pages = set()
+
+    for link in root_links:
+        url = link.get("url", "")
+
+        if not is_catholic_tradition_url(url) or not is_html_page_url(url):
+            continue
+
+        title = clean_gallery_label(link.get("text", ""), fallback=Path(urlparse(url).path).stem)
+
+        if should_skip_catholic_tradition_item(title) or url in seen_pages:
+            continue
+
+        gallery_pages.append({"url": url, "title": title})
+        seen_pages.add(url)
+
+        if len(gallery_pages) >= CATHOLIC_TRADITION_MAX_GALLERY_PAGES:
+            break
+
+    items: List[Dict[str, Any]] = []
+    seen_images = set()
+
+    for gallery in gallery_pages:
+        gallery_url = gallery["url"]
+        gallery_title = gallery["title"]
+        html = requests_get_text(gallery_url)
+
+        if not html:
+            continue
+
+        for link in parse_catholic_tradition_links(gallery_url, html):
+            image_url = link.get("url", "")
+
+            if not is_catholic_tradition_url(image_url) or not is_image_file_url(image_url):
+                continue
+
+            title = clean_gallery_label(link.get("text", ""), fallback=Path(urlparse(image_url).path).stem)
+
+            if should_skip_catholic_tradition_item(title, gallery_title) or image_url in seen_images:
+                continue
+
+            seen_images.add(image_url)
+            search_blob = clean_text(
+                " ".join(
+                    [
+                        title,
+                        gallery_title,
+                        Path(urlparse(image_url).path).stem.replace("-", " "),
+                    ]
+                )
+            ).lower()
+
+            items.append(
+                {
+                    "source": "Catholic Tradition",
+                    "image_id": hashlib.sha1(image_url.encode("utf-8")).hexdigest(),
+                    "title": title,
+                    "artist": "",
+                    "date": "",
+                    "medium": "traditional Catholic painting",
+                    "classification": "painting",
+                    "object_type": "sacred art",
+                    "department": gallery_title,
+                    "source_url": gallery_url,
+                    "image_url": image_url,
+                    "license": "Traditional Catholic image",
+                    "public_domain": False,
+                    "approved_for_use": True,
+                    "gallery_title": gallery_title,
+                    "assistive_text": search_blob,
+                    "search_blob": search_blob,
+                }
+            )
+
+    save_json(
+        index_path,
+        {
+            "version": CATHOLIC_TRADITION_INDEX_VERSION,
+            "created_at": time.time(),
+            "source": CATHOLIC_TRADITION_GALLERY_URL,
+            "items": items,
+        },
+    )
+
+    return items
 
 
 def nga_cache_dir() -> Path:
@@ -685,7 +1030,7 @@ def build_nga_index() -> List[Dict[str, Any]]:
                 "assistive_text": image.get("assistive_text", ""),
             }
 
-            if not candidate_is_painting(candidate):
+            if not candidate_is_catholic_painting(candidate):
                 continue
 
             candidate["search_blob"] = clean_text(
@@ -917,6 +1262,52 @@ def search_nga(term: str, clip: Dict[str, Any], max_results: int = 8) -> List[Di
     return results[:max_results]
 
 
+def search_catholic_tradition(term: str, clip: Dict[str, Any], max_results: int = 12) -> List[Dict[str, Any]]:
+    try:
+        index = build_catholic_tradition_index()
+    except Exception as exc:
+        print(f"Catholic Tradition image search unavailable: {exc}")
+        return []
+
+    tokens = text_tokens(
+        term,
+        clip.get("title", ""),
+        clip.get("main_idea", ""),
+        clip.get("image_idea", ""),
+        clip.get("power_quote", ""),
+    )
+    term_tokens = set(text_tokens(term))
+    results = []
+
+    for item in index:
+        blob = clean_text(item.get("search_blob", "")).lower()
+
+        if tokens and not any(token in blob for token in tokens):
+            continue
+
+        candidate = dict(item)
+        title = clean_text(candidate.get("title", "")).lower()
+        gallery_title = clean_text(candidate.get("gallery_title", "")).lower()
+        token_hits = sum(1 for token in tokens if token in blob)
+        title_hits = sum(1 for token in term_tokens if token in title)
+        gallery_hits = sum(1 for token in tokens if token in gallery_title)
+
+        candidate["search_term"] = term
+        candidate["score"] = round(
+            score_artwork(candidate, clip, term)
+            + 5.0
+            + min(6.0, token_hits * 0.65)
+            + min(3.0, title_hits * 0.9)
+            + min(3.0, gallery_hits * 0.9),
+            2,
+        )
+        candidate.pop("search_blob", None)
+        results.append(candidate)
+
+    results.sort(key=lambda item: item.get("score", 0), reverse=True)
+    return results[:max_results]
+
+
 def search_public_domain_art_for_clip(
     clip: Dict[str, Any],
     used_artwork_keys: Optional[set[str]] = None,
@@ -925,12 +1316,13 @@ def search_public_domain_art_for_clip(
     search_terms = build_search_terms(clip)
 
     for term in search_terms:
+        all_candidates.extend(search_catholic_tradition(term, clip))
         all_candidates.extend(search_nga(term, clip))
         all_candidates.extend(search_met(term, clip))
         all_candidates.extend(search_artic(term, clip))
         all_candidates.extend(search_rijksmuseum(term, clip))
 
-        all_candidates = [c for c in all_candidates if candidate_is_painting(c)]
+        all_candidates = [c for c in all_candidates if candidate_is_catholic_painting(c)]
         if used_artwork_keys is not None:
             all_candidates = [
                 c
@@ -957,8 +1349,37 @@ def search_public_domain_art_for_clip(
 
 
 def download_image(url: str) -> Image.Image:
-    response = requests.get(url, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0 Safari/537.36"
+        ),
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    }
+    urls = [url]
+
+    if is_catholic_tradition_url(url):
+        headers["Referer"] = CATHOLIC_TRADITION_GALLERY_URL
+
+        if url.startswith("http://"):
+            urls.insert(0, "https://" + url[len("http://"):])
+        elif url.startswith("https://"):
+            urls.append("http://" + url[len("https://"):])
+
+    last_exc: Optional[Exception] = None
+
+    for candidate_url in dict.fromkeys(urls):
+        try:
+            response = requests.get(candidate_url, timeout=REQUEST_TIMEOUT, headers=headers)
+            response.raise_for_status()
+            break
+        except Exception as exc:
+            last_exc = exc
+    else:
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(f"Could not download image: {url}")
 
     try:
         image = Image.open(BytesIO(response.content))
@@ -1216,7 +1637,11 @@ def ensure_image_for_clip(
                 "clip_id": clip.get("id"),
                 "clip_title": clip.get("title"),
                 "image_path": str(image_path),
-                "image_source_type": "public_domain",
+                "image_source_type": (
+                    "catholic_tradition_gallery"
+                    if clean_text(candidate.get("source", "")).lower() == "catholic tradition"
+                    else "public_domain"
+                ),
                 "artwork": candidate,
                 "artwork_key": artwork_key,
                 "all_candidates": image_search_result.get("candidates", []),
@@ -1227,7 +1652,8 @@ def ensure_image_for_clip(
             return meta
 
         except Exception as exc:
-            print(f"Public-domain image failed for clip {clip.get('id')}: {exc}")
+            source = clean_text(candidate.get("source", "artwork"))
+            print(f"Artwork image failed for clip {clip.get('id')} ({source}): {exc}")
             release_artwork_key(artwork_key, used_artwork_keys, artwork_lock)
 
     if allow_ai_fallback:
@@ -1280,7 +1706,7 @@ def make_background(image_path: Path) -> Image.Image:
     gradient_height = GRADIENT_BOTTOM - GRADIENT_TOP
 
     for offset in range(gradient_height):
-        alpha = int(255 * (1 - ((offset + 1) / gradient_height)))
+        alpha = int(GRADIENT_MAX_ALPHA * ((offset + 1) / gradient_height))
         y = GRADIENT_TOP + offset
         draw.line([(0, y), (CANVAS_SIZE[0], y)], fill=(0, 0, 0, alpha))
 
@@ -1291,11 +1717,8 @@ def text_overlay(text: str, title: bool = False) -> Image.Image:
     overlay = Image.new("RGBA", CANVAS_SIZE, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    if title:
-        text = str(text or "").upper()
-
-    font_size = 68 if title else 62
-    font = load_font(font_size, bold=True, serif=title)
+    font_size = 54
+    font = load_font(font_size, bold=True, serif=False)
 
     safe_left = TEXT_SAFE_LEFT
     safe_right = CANVAS_SIZE[0] - TEXT_SAFE_RIGHT
@@ -1321,16 +1744,16 @@ def text_overlay(text: str, title: bool = False) -> Image.Image:
 
     total_height, widths, heights = metrics()
 
-    while (len(wrap_text(text, font, safe_width)) > max_lines or total_height > safe_height) and font_size > 38:
+    while (len(wrap_text(text, font, safe_width)) > max_lines or total_height > safe_height) and font_size > 36:
         font_size -= 4
-        font = load_font(font_size, bold=True, serif=title)
+        font = load_font(font_size, bold=True, serif=False)
         lines = wrap_text(text, font, safe_width)[:max_lines]
         total_height, widths, heights = metrics()
 
     line_gap = int(font_size * 0.32)
     y = safe_top + max(0, (safe_height - total_height) // 2)
 
-    fill = (206, 24, 32, 255) if title else (255, 255, 255, 255)
+    fill = (255, 255, 255, 255)
     shadow = (0, 0, 0, 220)
 
     for line, width, height in zip(lines, widths, heights):
@@ -1726,16 +2149,15 @@ def render_video_clip(
     print(f"Rendering clip {clip.get('id')}: {clip.get('title')}")
     duration = float(clip["end"]) - float(clip["start"])
 
-    cut_audio_clip(
-        source_audio=source_audio,
-        start=float(clip["start"]),
-        end=float(clip["end"]),
-        output_path=audio_path,
-    )
-
     bg_audio_path = None
 
     if bg_audio_files and duration <= MAX_BG_MUSIC_SECONDS:
+        cut_audio_clip(
+            source_audio=source_audio,
+            start=float(clip["start"]),
+            end=float(clip["end"]),
+            output_path=audio_path,
+        )
         bg_audio_path = mix_background_music(
             speech_path=audio_path,
             bg_audio_files=bg_audio_files,
@@ -1754,11 +2176,6 @@ def render_video_clip(
     background = np.array(make_background(image_path))
     layers = [ImageClip(background, duration=duration)]
 
-    title_duration = min(TITLE_SECONDS, max(1.4, duration * 0.18))
-
-    title_img = np.array(text_overlay(clip.get("title", ""), title=True))
-    layers.append(ImageClip(title_img, duration=title_duration).with_start(0))
-
     clip_start = float(clip["start"])
 
     for group in clip.get("caption_groups", []):
@@ -1770,17 +2187,17 @@ def render_video_clip(
         rel_start = max(0.0, float(group["start"]) - clip_start)
         rel_end = min(duration, max(rel_start + 0.3, float(group["end"]) - clip_start))
 
-        if rel_end <= title_duration:
-            continue
-
-        rel_start = max(rel_start, title_duration)
         caption_img = np.array(text_overlay(text, title=False))
 
         layers.append(
             ImageClip(caption_img, duration=rel_end - rel_start).with_start(rel_start)
         )
 
-    audio = AudioFileClip(str(audio_path))
+    if bg_audio_path:
+        audio = AudioFileClip(str(audio_path))
+    else:
+        audio = AudioFileClip(str(source_audio)).subclipped(float(clip["start"]), float(clip["end"]))
+
     video = CompositeVideoClip(layers, size=CANVAS_SIZE).with_audio(audio).with_duration(duration)
 
     video_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1829,6 +2246,8 @@ def write_manifest_and_metadata(
         clip_id = int(clip["id"])
         image_meta = image_meta_by_clip_id.get(clip_id, {})
         artwork = image_meta.get("artwork")
+        artwork_source = clean_text((artwork or {}).get("source", ""))
+        suppress_credit = artwork_source.lower() == "catholic tradition"
 
         upload_metadata["clips"].append(
             {
@@ -1857,10 +2276,10 @@ def write_manifest_and_metadata(
                 "clip_title": clip.get("title", ""),
                 "image_source_type": image_meta.get("image_source_type", ""),
                 "artwork_title": (artwork or {}).get("title", ""),
-                "artist": (artwork or {}).get("artist", ""),
-                "source": (artwork or {}).get("source", ""),
-                "source_url": (artwork or {}).get("source_url", ""),
-                "license": (artwork or {}).get("license", ""),
+                "artist": "" if suppress_credit else (artwork or {}).get("artist", ""),
+                "source": "" if suppress_credit else artwork_source,
+                "source_url": "" if suppress_credit else (artwork or {}).get("source_url", ""),
+                "license": "" if suppress_credit else (artwork or {}).get("license", ""),
                 "image_path": image_meta.get("image_path", ""),
                 "artwork_key": image_meta.get("artwork_key", ""),
             }

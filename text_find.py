@@ -153,6 +153,7 @@ def find_homily(
     alt_end_marker=HOMILY_ALT_END_MARKER,
     audio_file=None,
     working_dir=None,
+    interactive_fallback=True,
 ):
     """
     Locate the homily by:
@@ -160,7 +161,7 @@ def find_homily(
       2. Starting right after that marker.
       3. Looking for the LAST closing marker from that point onward.
       4. Falling back to the last transcript word if no closing marker is found.
-      4. If marker not found, fall back to manual start/end entry.
+      5. If marker not found, fall back to manual start/end entry when enabled.
     Returns: first, last, homily_text, video_segments
     """
     try:
@@ -224,7 +225,13 @@ def find_homily(
 
         return first, last, homily_text, video_segments
 
-    except (UnboundLocalError, RuntimeError):
+    except (UnboundLocalError, RuntimeError) as exc:
+        if not interactive_fallback:
+            raise RuntimeError(
+                "Could not locate the homily boundaries automatically. "
+                "The unattended workflow will not guess and upload the wrong section."
+            ) from exc
+
         print("🚫 Could not locate the homily section in your transcript.")
         print("   • You can now manually enter the start and end times.")
 

@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import random
 import re
 import shutil
 from datetime import date, datetime, time, timedelta, timezone
@@ -26,9 +25,12 @@ from youtube import (
 
 DEFAULT_GOOGLE_USER_ID = "102136376185174842894"
 DEFAULT_SCHEDULE_TIMEZONE = "America/New_York"
-DEFAULT_SCHEDULE_WINDOW_START = "16:00"
-DEFAULT_SCHEDULE_WINDOW_END = "20:00"
-DEFAULT_SCHEDULE_DAYS = 5
+DEFAULT_WEEKDAY_SCHEDULE_START = "17:30"
+DEFAULT_WEEKDAY_SCHEDULE_END = "21:30"
+DEFAULT_WEEKDAY_SCHEDULE_INTERVAL_MINUTES = 90
+DEFAULT_SATURDAY_SCHEDULE_START = "10:00"
+DEFAULT_SATURDAY_SCHEDULE_END = "21:30"
+DEFAULT_SATURDAY_SCHEDULE_INTERVAL_MINUTES = 120
 HASHTAG_VOLUME_CACHE_MAX_AGE_DAYS = 30
 SHORTS_BASE_TAGS = [
     "Catholic",
@@ -47,10 +49,14 @@ SHORTS_BASE_TAGS = [
 ]
 
 BROAD_HASHTAGS = [
+    "#shorts",
     "#catholic",
     "#christian",
     "#faith",
     "#prayer",
+    "#jesus",
+    "#god",
+    "#bible",
     "#catholicfaith",
     "#traditionalcatholic",
 ]
@@ -182,9 +188,27 @@ def find_clip_for_video(upload_metadata: Dict[str, Any], video_path: str) -> Dic
     raise ValueError(f"Could not find video in upload_metadata.json: {video_path}")
 
 
-def shorts_title(title: str) -> str:
+def shorts_title(
+    title: str,
+    hashtags: Optional[List[str]] = None,
+    title_hashtag_count: int = 2,
+) -> str:
     title = str(title or "Catholic Homily Short").strip()
-    title = re.sub(r"(?i)\s*#shorts?\b", "", title).strip()
+    title = re.sub(r"(?i)\s*#[a-z0-9_]+\b", "", title).strip()
+    title = re.sub(r"\s+", " ", title)
+
+    title_hashtags = dedupe_keep_order(hashtags or [])[: max(0, int(title_hashtag_count or 0))]
+
+    for hashtag in title_hashtags:
+        candidate = f"{title} {hashtag}".strip()
+
+        if len(candidate) <= 100:
+            title = candidate
+            continue
+
+        max_title_len = max(0, 100 - len(hashtag) - 1)
+        title = f"{title[:max_title_len].rstrip()} {hashtag}".strip()
+
     return title[:100].rstrip()
 
 
@@ -471,58 +495,89 @@ def parse_schedule_start_date(value: Optional[str], tz: ZoneInfo) -> date:
     if value:
         return datetime.strptime(value, "%Y-%m-%d").date()
 
-    return (datetime.now(tz) + timedelta(days=1)).date()
+    return datetime.now(tz).date()
 
 
-def random_schedule_times(
+def schedule_slots_for_day(
+    day: date,
+    tz: ZoneInfo,
+    weekday_start: str = DEFAULT_WEEKDAY_SCHEDULE_START,
+    weekday_end: str = DEFAULT_WEEKDAY_SCHEDULE_END,
+    weekday_interval_minutes: int = DEFAULT_WEEKDAY_SCHEDULE_INTERVAL_MINUTES,
+    saturday_start: str = DEFAULT_SATURDAY_SCHEDULE_START,
+    saturday_end: str = DEFAULT_SATURDAY_SCHEDULE_END,
+    saturday_interval_minutes: int = DEFAULT_SATURDAY_SCHEDULE_INTERVAL_MINUTES,
+) -> List[datetime]:
+    if day.weekday() == 5:
+        start_time = parse_hhmm(saturday_start)
+        end_time = parse_hhmm(saturday_end)
+        interval_minutes = int(saturday_interval_minutes)
+    else:
+        start_time = parse_hhmm(weekday_start)
+        end_time = parse_hhmm(weekday_end)
+        interval_minutes = int(weekday_interval_minutes)
+
+    if interval_minutes <= 0:
+        raise ValueError("Schedule interval must be greater than 0 minutes.")
+
+    start_dt = datetime.combine(day, start_time, tzinfo=tz)
+    end_dt = datetime.combine(day, end_time, tzinfo=tz)
+
+    if end_dt <= start_dt:
+        raise ValueError("Schedule end time must be later than start time.")
+
+    slots: List[datetime] = []
+    cursor = start_dt
+
+    while cursor <= end_dt:
+        slots.append(cursor)
+        cursor += timedelta(minutes=interval_minutes)
+
+    return slots
+
+
+def fixed_schedule_times(
     count: int,
     start_date: date,
-    days: int = DEFAULT_SCHEDULE_DAYS,
-    window_start: str = DEFAULT_SCHEDULE_WINDOW_START,
-    window_end: str = DEFAULT_SCHEDULE_WINDOW_END,
     timezone_name: str = DEFAULT_SCHEDULE_TIMEZONE,
+    weekday_start: str = DEFAULT_WEEKDAY_SCHEDULE_START,
+    weekday_end: str = DEFAULT_WEEKDAY_SCHEDULE_END,
+    weekday_interval_minutes: int = DEFAULT_WEEKDAY_SCHEDULE_INTERVAL_MINUTES,
+    saturday_start: str = DEFAULT_SATURDAY_SCHEDULE_START,
+    saturday_end: str = DEFAULT_SATURDAY_SCHEDULE_END,
+    saturday_interval_minutes: int = DEFAULT_SATURDAY_SCHEDULE_INTERVAL_MINUTES,
 ) -> List[datetime]:
     if count <= 0:
         return []
 
     tz = ZoneInfo(timezone_name)
-    start_time = parse_hhmm(window_start)
-    end_time = parse_hhmm(window_end)
-    start_minutes = start_time.hour * 60 + start_time.minute
-    end_minutes = end_time.hour * 60 + end_time.minute
-
-    if end_minutes <= start_minutes:
-        raise ValueError("--schedule-window-end must be later than --schedule-window-start.")
-
-    days = max(1, int(days))
     now = datetime.now(tz)
+    minimum_publish_at = now + timedelta(minutes=15)
     scheduled: List[datetime] = []
+    day = start_date
 
-    for _ in range(count):
-        for _attempt in range(100):
-            day = start_date + timedelta(days=random.randrange(days))
-            minute = random.randrange(start_minutes, end_minutes + 1)
-            publish_at = datetime.combine(
-                day,
-                time(hour=minute // 60, minute=minute % 60),
-                tzinfo=tz,
-            )
+    while len(scheduled) < count:
+        for publish_at in schedule_slots_for_day(
+            day=day,
+            tz=tz,
+            weekday_start=weekday_start,
+            weekday_end=weekday_end,
+            weekday_interval_minutes=weekday_interval_minutes,
+            saturday_start=saturday_start,
+            saturday_end=saturday_end,
+            saturday_interval_minutes=saturday_interval_minutes,
+        ):
+            if publish_at <= minimum_publish_at:
+                continue
 
-            if publish_at > now + timedelta(minutes=15):
-                scheduled.append(publish_at)
+            scheduled.append(publish_at)
+
+            if len(scheduled) >= count:
                 break
-        else:
-            fallback_day = max(start_date, (now + timedelta(days=1)).date())
-            minute = random.randrange(start_minutes, end_minutes + 1)
-            scheduled.append(
-                datetime.combine(
-                    fallback_day,
-                    time(hour=minute // 60, minute=minute % 60),
-                    tzinfo=tz,
-                )
-            )
 
-    return sorted(scheduled)
+        day += timedelta(days=1)
+
+    return scheduled
 
 
 def youtube_publish_at(dt: Optional[datetime]) -> Optional[str]:
@@ -614,6 +669,44 @@ def find_related_video_id_from_mdx(clips_root: str) -> str:
             return video_id
 
     return ""
+
+
+def prompt_for_related_video_id(clips_root: str, detected_video_id: str = "") -> str:
+    print()
+    print(f"Video Clips folder: {clips_root}")
+
+    if detected_video_id:
+        print(f"Detected full homily video: {youtube_watch_url(detected_video_id)}")
+        value = input("Enter full homily YouTube ID/URL, press Enter to use detected, or type skip: ")
+        value = clean_path(value)
+
+        if not value:
+            return detected_video_id
+
+        if value.lower() in {"skip", "none", "no"}:
+            return ""
+
+        return extract_youtube_video_id(value)
+
+    print("No full homily YouTube video ID was found for this Shorts folder.")
+    value = input("Enter the full homily YouTube video ID or URL (blank to skip): ")
+    return extract_youtube_video_id(value)
+
+
+def resolve_related_video_id(
+    clips_root: str,
+    provided_value: str = "",
+    prompt_if_missing: bool = True,
+) -> str:
+    if provided_value:
+        return extract_youtube_video_id(provided_value)
+
+    detected_video_id = find_related_video_id_from_mdx(clips_root)
+
+    if prompt_if_missing:
+        return prompt_for_related_video_id(clips_root, detected_video_id=detected_video_id)
+
+    return detected_video_id
 
 
 def youtube_upload_scheduled_short_video(
@@ -851,6 +944,7 @@ def upload_short(
     add_related_video_link: bool = True,
     use_volume_hashtags: bool = True,
     refresh_hashtag_volume: bool = False,
+    title_hashtag_count: int = 2,
 ) -> Dict[str, Any]:
     video_path = resolve_video_path(video_path)
     clips_root = clips_root_from_video(video_path)
@@ -872,18 +966,20 @@ def upload_short(
         related_video_id = ""
     elif related_video_id:
         related_video_id = extract_youtube_video_id(related_video_id)
-    else:
-        related_video_id = find_related_video_id_from_mdx(clips_root)
 
     tokens = get_and_refresh_google_user_tokens(google_user_id)
 
-    title = shorts_title(str(clip.get("title") or "Catholic Homily Short"))
     hashtags = shorts_hashtags(
         clip,
         tokens=tokens,
         cache_path=hashtag_volume_cache_path(clips_root),
         use_volume=use_volume_hashtags,
         refresh_volume=refresh_hashtag_volume,
+    )
+    title = shorts_title(
+        str(clip.get("title") or "Catholic Homily Short"),
+        hashtags=hashtags,
+        title_hashtag_count=title_hashtag_count,
     )
     description = shorts_description(
         clip,
@@ -949,8 +1045,10 @@ def upload_short(
         "youtube_video_id": video_id,
         "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
         "title": title,
-        "privacy_status": "scheduled_public" if scheduled_publish_at else "private",
+        "title_hashtags": dedupe_keep_order(hashtags)[: max(0, int(title_hashtag_count or 0))],
+        "privacy_status": "scheduled_public" if scheduled_publish_at else "private_draft_manual_schedule",
         "scheduled_publish_at": scheduled_publish_at.isoformat() if scheduled_publish_at else "",
+        "manual_schedule_required": scheduled_publish_at is None,
         "related_video_id": related_video_id,
         "related_video_url": youtube_watch_url(related_video_id) if related_video_id else "",
         "hashtags": hashtags,
@@ -970,7 +1068,7 @@ def upload_short(
 
 def main() -> None:
     load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-    parser = argparse.ArgumentParser(description="Upload generated homily Shorts to YouTube as private drafts or scheduled public releases.")
+    parser = argparse.ArgumentParser(description="Upload generated homily Shorts to YouTube as scheduled public releases.")
     parser.add_argument(
         "target",
         nargs="?",
@@ -980,16 +1078,22 @@ def main() -> None:
     parser.add_argument("--no-move", action="store_true", help="Do not move the uploaded MP4 into videos/uploaded.")
     parser.add_argument("--thumbnail-only", action="store_true", help="Reapply upload-safe thumbnails to already uploaded Shorts without uploading videos.")
     parser.add_argument("--reupload", action="store_true", help="Upload videos even when the clip id already appears in shorts_youtube_uploads.json.")
-    parser.add_argument("--schedule", action="store_true", help="Schedule Shorts for public release at random times instead of leaving them as private drafts.")
-    parser.add_argument("--schedule-start-date", help="First local date eligible for scheduling, in YYYY-MM-DD. Defaults to tomorrow.")
-    parser.add_argument("--schedule-days", type=int, default=DEFAULT_SCHEDULE_DAYS, help="Number of days to randomly distribute scheduled Shorts across. Default: 5.")
-    parser.add_argument("--schedule-window-start", default=DEFAULT_SCHEDULE_WINDOW_START, help="Earliest local publish time, HH:MM. Default: 16:00.")
-    parser.add_argument("--schedule-window-end", default=DEFAULT_SCHEDULE_WINDOW_END, help="Latest local publish time, HH:MM. Default: 20:00.")
+    parser.add_argument("--schedule", action="store_true", help="Compatibility option. Scheduling is now the default unless --draft is used.")
+    parser.add_argument("--draft", action="store_true", help="Upload private drafts only. No schedule is set; you must manually schedule them in YouTube Studio.")
+    parser.add_argument("--schedule-start-date", help="First local date eligible for scheduling, in YYYY-MM-DD. Defaults to today.")
+    parser.add_argument("--weekday-schedule-start", default=DEFAULT_WEEKDAY_SCHEDULE_START, help="Weekday/Sunday first publish time, HH:MM. Default: 17:30.")
+    parser.add_argument("--weekday-schedule-end", default=DEFAULT_WEEKDAY_SCHEDULE_END, help="Weekday/Sunday latest publish time, HH:MM. Default: 21:30.")
+    parser.add_argument("--weekday-schedule-interval-minutes", type=int, default=DEFAULT_WEEKDAY_SCHEDULE_INTERVAL_MINUTES, help="Minutes between weekday/Sunday Shorts. Default: 90.")
+    parser.add_argument("--saturday-schedule-start", default=DEFAULT_SATURDAY_SCHEDULE_START, help="Saturday first publish time, HH:MM. Default: 10:00.")
+    parser.add_argument("--saturday-schedule-end", default=DEFAULT_SATURDAY_SCHEDULE_END, help="Saturday latest publish time, HH:MM. Default: 21:30.")
+    parser.add_argument("--saturday-schedule-interval-minutes", type=int, default=DEFAULT_SATURDAY_SCHEDULE_INTERVAL_MINUTES, help="Minutes between Saturday Shorts. Default: 120.")
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="IANA timezone for scheduling. Default: America/New_York.")
-    parser.add_argument("--related-video-id", help="Optional full homily YouTube video ID or URL. Defaults to the MDX media_path/youtube id when found.")
+    parser.add_argument("--related-video-id", help="Optional full homily YouTube video ID or URL. If omitted, the script prompts and offers any detected ID as the default.")
     parser.add_argument("--no-related-video-link", action="store_true", help="Do not add the full homily link to Shorts descriptions.")
+    parser.add_argument("--no-related-video-prompt", action="store_true", help="Do not prompt or confirm; use the detected full homily ID if one exists.")
     parser.add_argument("--no-volume-hashtags", action="store_true", help="Use relevance-ranked hashtags without checking YouTube search volume.")
     parser.add_argument("--refresh-hashtag-volume", action="store_true", help="Refresh cached YouTube hashtag volume estimates before ranking hashtags.")
+    parser.add_argument("--title-hashtags", type=int, default=2, help="Number of volume-ranked hashtags to append to the Shorts title. Default: 2.")
     args = parser.parse_args()
 
     if not args.target:
@@ -1007,30 +1111,58 @@ def main() -> None:
         print(str(exc))
         return
 
+    schedule_uploads = not args.draft
     scheduled_times: List[Optional[datetime]] = [None] * len(videos)
 
-    if args.schedule:
+    if schedule_uploads:
         schedule_tz = ZoneInfo(args.schedule_timezone)
         schedule_start = parse_schedule_start_date(args.schedule_start_date, schedule_tz)
-        scheduled_times = random_schedule_times(
+        scheduled_times = fixed_schedule_times(
             count=len(videos),
             start_date=schedule_start,
-            days=args.schedule_days,
-            window_start=args.schedule_window_start,
-            window_end=args.schedule_window_end,
             timezone_name=args.schedule_timezone,
+            weekday_start=args.weekday_schedule_start,
+            weekday_end=args.weekday_schedule_end,
+            weekday_interval_minutes=args.weekday_schedule_interval_minutes,
+            saturday_start=args.saturday_schedule_start,
+            saturday_end=args.saturday_schedule_end,
+            saturday_interval_minutes=args.saturday_schedule_interval_minutes,
         )
 
-    print(f"Uploading {len(videos)} Shorts draft(s)...")
+    print(f"Uploading {len(videos)} Shorts {'scheduled public release(s)' if schedule_uploads else 'private draft(s) for manual scheduling'}...")
 
-    if args.schedule:
+    if schedule_uploads:
+        schedule_days = len({item.date() for item in scheduled_times})
+        first_slot = scheduled_times[0].isoformat() if scheduled_times else ""
+        last_slot = scheduled_times[-1].isoformat() if scheduled_times else ""
         print(
-            "Scheduling randomly between "
-            f"{args.schedule_window_start} and {args.schedule_window_end} "
-            f"{args.schedule_timezone} across {args.schedule_days} day(s)."
+            "Scheduling from today using fixed slots: "
+            f"weekday/Sunday {args.weekday_schedule_start}-{args.weekday_schedule_end} "
+            f"every {args.weekday_schedule_interval_minutes} minutes; "
+            f"Saturday {args.saturday_schedule_start}-{args.saturday_schedule_end} "
+            f"every {args.saturday_schedule_interval_minutes} minutes."
+        )
+        print(
+            f"Schedule spans {schedule_days} day(s), "
+            f"from {first_slot} to {last_slot}."
+        )
+    else:
+        print("Draft mode: videos will be uploaded as private. No publishAt schedule will be set.")
+
+    related_video_id = ""
+
+    if not args.no_related_video_link:
+        first_clips_root = clips_root_from_video(videos[0])
+        related_video_id = resolve_related_video_id(
+            clips_root=first_clips_root,
+            provided_value=clean_path(args.related_video_id or ""),
+            prompt_if_missing=not args.no_related_video_prompt,
         )
 
-    related_video_id = clean_path(args.related_video_id or "")
+        if related_video_id:
+            print(f"Full homily link: {youtube_watch_url(related_video_id)}")
+        else:
+            print("No full homily link will be added.")
 
     records = []
     for video_path, scheduled_publish_at in zip(videos, scheduled_times):
@@ -1048,10 +1180,11 @@ def main() -> None:
                 add_related_video_link=not args.no_related_video_link,
                 use_volume_hashtags=not args.no_volume_hashtags,
                 refresh_hashtag_volume=args.refresh_hashtag_volume,
+                title_hashtag_count=args.title_hashtags,
             )
         )
 
-    print("\nUploaded Shorts draft(s):")
+    print("\nUploaded Shorts:")
     print(json.dumps(records, indent=2, ensure_ascii=False))
 
 

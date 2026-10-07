@@ -43,7 +43,7 @@ def parse_clip_ids(values: list[str]) -> list[int]:
 
 
 def prompt_for_manual_clips_if_needed(args: argparse.Namespace) -> None:
-    if args.manual_clips or args.no_manual_clips_prompt:
+    if args.manual_clips or args.no_manual_clips_prompt or args.select_all:
         return
 
     if args.step not in {"2", "all"}:
@@ -145,6 +145,17 @@ def run_step_3_select(args: argparse.Namespace, analysis_path: Path) -> dict:
 
     selection = args.select
 
+    if args.select_all:
+        clip_ids = [
+            str(int(clip.get("id", 0)))
+            for clip in analysis.get("clips", [])
+            if int(clip.get("id", 0)) > 0
+        ]
+        if not clip_ids:
+            raise ValueError("No Shorts candidates were available for automatic selection.")
+        selection = ",".join(clip_ids)
+        print(f"Automatically selecting all {len(clip_ids)} ranked Shorts candidates.")
+
     if not selection:
         selection = prompt_user_for_selection(analysis)
 
@@ -201,6 +212,12 @@ def parse_args() -> argparse.Namespace:
         "--select",
         default=None,
         help='Clip IDs to render, example: "1, 2-5, 7, 9-12". If omitted, you will be prompted.',
+    )
+
+    parser.add_argument(
+        "--select-all",
+        action="store_true",
+        help="Select every ranked candidate without prompting. Intended for automatic runs.",
     )
 
     parser.add_argument(
@@ -267,8 +284,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--bg-audio-dir",
-        default=str(DEFAULT_BG_AUDIO_DIR),
-        help="Folder containing background music files. Music is skipped automatically for clips over 55 seconds.",
+        default=None,
+        help="Optional folder containing background music files. Background music is off unless this is set.",
     )
 
     parser.add_argument(
@@ -348,7 +365,7 @@ def main() -> None:
                 f"shorts_analysis.json does not exist yet: {analysis_path}. Run Step #2 first."
             )
 
-        if args.manual_clips and not args.select:
+        if args.manual_clips and not args.select and not args.select_all:
             print()
             print("STEP 3: Manual clips are already selected")
             print("=" * 80)

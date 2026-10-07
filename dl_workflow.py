@@ -23,6 +23,7 @@ from youtube import (
 from googleapiclient.errors import HttpError
 from txt_to_json import txt_to_json
 from transcript_editor import generate_transcript_editor
+import argparse
 import re
 import tempfile
 import shutil
@@ -329,9 +330,12 @@ def write_homily_json_from_video_script(video_script_path, homily_json_path):
     return video_script, homily_text, video_segments
 
 
-def prompt_for_transcript_review(video_script_path, audio_path=None):
-    answer = input("Review/correct transcript before making the video? [y/N]: ").strip().lower()
-    if answer not in {"y", "yes"}:
+def prompt_for_transcript_review(video_script_path, audio_path=None, review=None):
+    if review is None:
+        answer = input("Review/correct transcript before making the video? [y/N]: ").strip().lower()
+        review = answer in {"y", "yes"}
+
+    if not review:
         return False
 
     editor_path = generate_transcript_editor(video_script_path, audio_path=audio_path)
@@ -352,8 +356,26 @@ def prompt_for_transcript_review(video_script_path, audio_path=None):
 
     return True
 
-def main():
-    audio_file, image_file = prompt_user()
+
+def existing_youtube_video_id(metadata):
+    value = str(metadata.get("media_path") or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{8,}", value):
+        return value
+    return ""
+
+
+def main(audio_file=None, non_interactive=False, review_transcript=None):
+    if audio_file:
+        audio_file = clean_path(audio_file)
+        image_file = audio_file
+    elif non_interactive:
+        raise ValueError("An audio file path is required in non-interactive mode.")
+    else:
+        audio_file, image_file = prompt_user()
+
+    if not os.path.isfile(audio_file):
+        raise FileNotFoundError(f"Audio file does not exist: {audio_file}")
+
     dir = os.path.dirname(audio_file)
     working_dir = os.path.join(dir, "working")
     final_output_dir = os.path.join(dir, "final")
@@ -386,8 +408,16 @@ def main():
     homily_file = os.path.join(working_dir, "homily.mp3")
 
     try:
-        start, end, text, segments = find_homily(transcript)
+        start, end, text, segments = find_homily(
+            transcript,
+            audio_file=audio_file,
+            working_dir=working_dir,
+            interactive_fallback=not non_interactive,
+        )
     except (UnboundLocalError, RuntimeError):
+        if non_interactive:
+            raise
+
         print("🚫 Could not locate the homily section in your transcript.")
         print("   • You can now manually enter the start and end times.")
 
@@ -465,7 +495,12 @@ def main():
             json.dump(video_script, f, indent=4)
         print("Video script saved.")
 
-    if prompt_for_transcript_review(video_script_path, audio_path=homily_file):
+    transcript_review = False if non_interactive else review_transcript
+    if prompt_for_transcript_review(
+        video_script_path,
+        audio_path=homily_file,
+        review=transcript_review,
+    ):
         return
 
     # Persist a canonical homily-only payload from the corrected video script.
@@ -495,10 +530,11 @@ def main():
         print("Starting Auphonic production…")
         uuid = start_production(homily_file)
         if not uuid:
-            print("Production failed to start.")
-            return
-        clean_path = download_file(uuid, working_dir)
-        os.rename(clean_path, homily_file_clean)
+            raise RuntimeError("Auphonic production failed to start.")
+        downloaded_audio_path = download_file(uuid, working_dir)
+        if not downloaded_audio_path:
+            raise RuntimeError("Auphonic production completed without a downloadable audio file.")
+        os.rename(downloaded_audio_path, homily_file_clean)
         print(f"Downloaded cleaned homily to {homily_file_clean}")
 
     homily_file_final = os.path.join(working_dir, "homily_final.mp3")
@@ -531,8 +567,7 @@ def main():
 
         intro_video_path = os.path.join(os.path.dirname(__file__), "mylatinmass-intro-fixed.mp4")
         if not os.path.exists(intro_video_path):
-            print(f"Intro video not found at {intro_video_path}. Cannot concatenate.")
-            return
+            raise FileNotFoundError(f"Intro video not found at {intro_video_path}.")
         concat_list_path = os.path.join(working_dir, "concat_list.txt")
         with open(concat_list_path, "w", encoding="utf-8") as f:
             f.write(f"file '{intro_video_path}'\n")
@@ -562,44 +597,42 @@ def main():
     # -------------------------------
     # 9. Upload to YouTube
     # -------------------------------
-    google_user_id = "102136376185174842894"
+    google_user_id = os.getenv("GOOGLE_USER_ID", "102136376185174842894")
     try:
-        tokens = get_and_refresh_google_user_tokens(google_user_id)
+        video_id = existing_youtube_video_id(metadata)
+        if video_id:
+            print(f"✅ Full homily is already uploaded as {video_id}; skipping duplicate upload.")
+        else:
+            tokens = get_and_refresh_google_user_tokens(google_user_id)
 
-        # Upload video. The helper handles:
-        # - thumbnail search (ANY image in final folder)
-        # - privacy (public if thumbnail exists else private draft)
-        # - thumbnail set if found
-        video_id = youtube_upload_video_with_optional_thumbnail(
-            tokens=tokens,
-            file_path=final_video_path,
-            title=metadata["title"],
-            description=youtube_payload["description"],
-            tags=youtube_payload["tags"],
-            categoryId=youtube_payload["category"],
-            edu_type=youtube_payload["edu_type"],
-            edu_problems=youtube_payload["edu_problems"],
-            chapters=youtube_payload["chapters"],
-            chapter_offset_sec=11.0,
-        )
+            # The helper uploads publicly when the generated thumbnail is present.
+            video_id = youtube_upload_video_with_optional_thumbnail(
+                tokens=tokens,
+                file_path=final_video_path,
+                title=metadata["title"],
+                description=youtube_payload["description"],
+                tags=youtube_payload["tags"],
+                categoryId=youtube_payload["category"],
+                edu_type=youtube_payload["edu_type"],
+                edu_problems=youtube_payload["edu_problems"],
+                chapters=youtube_payload["chapters"],
+                chapter_offset_sec=11.0,
+            )
 
-        if not video_id:
-            raise RuntimeError("YouTube upload failed: no video_id returned.")
+            if not video_id:
+                raise RuntimeError("YouTube upload failed: no video_id returned.")
 
-        print("✅ Video uploaded successfully. Video ID:", video_id)
+            print("✅ Video uploaded successfully. Video ID:", video_id)
 
-        # Optional: update title/description (no thumbnail here; helper already handled it)
-        update_result = youtube_update_video(
-            tokens=tokens,
-            video_id=video_id,
-            new_description=youtube_payload["final_description"],
-            new_title=metadata["title"],
-            new_thumbnail_path=None
-        )
-        print("Update Response:", update_result)
-
-        # Upload captions
-        youtube_upload_captions(tokens, video_id=video_id, caption_file_path=srt_file)
+            update_result = youtube_update_video(
+                tokens=tokens,
+                video_id=video_id,
+                new_description=youtube_payload["final_description"],
+                new_title=metadata["title"],
+                new_thumbnail_path=None,
+            )
+            print("Update Response:", update_result)
+            youtube_upload_captions(tokens, video_id=video_id, caption_file_path=srt_file)
 
         # Save YouTube ID back into MDX
         post.metadata["media_path"] = video_id
@@ -618,9 +651,44 @@ def main():
         if os.path.exists(temp_mdx_path):
             os.remove(temp_mdx_path)
 
+        return {
+            "root": dir,
+            "working_dir": working_dir,
+            "final_output_dir": final_output_dir,
+            "homily_json": homily_json_path,
+            "homily_audio": homily_file_final,
+            "final_video": final_video_path,
+            "thumbnail": os.path.join(final_output_dir, "thumbnail.jpg"),
+            "mdx": final_mdx_path,
+            "youtube_video_id": video_id,
+        }
+
     except Exception as e:
         print("Error:", e)
         raise
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Create and publish a full homily video from an audio file."
+    )
+    parser.add_argument("audio_file", nargs="?", help="Source audio file path.")
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Disable transcript and boundary prompts; fail clearly if automatic detection is ambiguous.",
+    )
+    parser.add_argument(
+        "--review-transcript",
+        action="store_true",
+        help="Open the transcript editor before rendering. Ignored in non-interactive mode.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    cli_args = parse_args()
+    main(
+        audio_file=cli_args.audio_file,
+        non_interactive=cli_args.non_interactive,
+        review_transcript=True if cli_args.review_transcript else None,
+    )
